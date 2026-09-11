@@ -21,12 +21,21 @@ EDIT_TOP    EQU 3
 EDIT_BOTTOM EQU 21
 TEXT_ATTR   EQU 0Ch               ; rojo inicial; Alt+M rota rojo, verde y cyan
 BUFFER_SIZE EQU 1520              ; 19 renglones x 80 columnas
+MAX_FILES   EQU 10
 
 .data
 titleLine   db '  EDITOR DE TEXTO  |  Documento sin guardar', 0
 borderLine  db '--------------------------------------------------------------------------------', 0
 hintLine    db 'Alt+H: ayuda | Alt+M/N: colores | Alt+I/J: imagenes | Alt+S: guardar', 0
 statusLine  db 'Estado: EDITANDO  |  ESC: volver sin guardar', 0
+emptyLine   db 80 dup (' '), 0
+activeName  db 'DOCUMENT.EDT', 0  ; nombre activo, actualizado por el navegador
+dirtyText   db '*', 0
+cleanText   db ' ', 0
+labelFila   db 'F:', 0
+labelCol    db 'C:', 0
+labelText   db 'T:', 0
+labelBack   db 'B:', 0
 help1       db 'ATAJOS DEL EDITOR', 0
 help2       db 'Alt+C  Centrar cursor       Alt+U / Alt+D  Ir arriba / abajo', 0
 help3       db 'Alt+M  Alternar color letra Alt+N          Alternar color fondo', 0
@@ -53,6 +62,16 @@ replaceInput db 15, 0, 15 dup (0)
 findLen     db 0
 replaceLen  db 0
 searchLimit dw 0
+dirtyFlag   db 0
+dtaBuffer   db 128 dup (0)
+filePattern db '*.EDT', 0
+fileList    db MAX_FILES * 13 dup (0)
+fileCount   db 0
+fileIndex   db 0
+browserTitle db 'NAVEGADOR DE ARCHIVOS .EDT', 0
+browserHint db 'Flechas: seleccionar   Enter: abrir   ESC: cancelar', 0
+noFilesText db 'No hay archivos .EDT en esta carpeta.', 0
+selectMark  db '>', 0
 
 .code
 main PROC
@@ -74,6 +93,7 @@ PantallaEdicion PROC NEAR
     mov cursorCol, 0
 
 LeerTecla:
+    call ActualizarEstado
     call ColocarCursor
     mov ah, 00h
     int 16h
@@ -194,14 +214,17 @@ AplicarFondo:
 InsertarImagen1:
     mov si, OFFSET img1
     call InsertarImagen
+    mov dirtyFlag, 1
     jmp LeerTecla
 InsertarImagen2:
     mov si, OFFSET img2
     call InsertarImagen
+    mov dirtyFlag, 1
     jmp LeerTecla
 
 BuscarYReemplazar:
     call BuscarReemplazar
+    mov dirtyFlag, 1
     jmp LeerTecla
 
 AbrirAyuda:
@@ -220,6 +243,7 @@ BorrarAnterior:
 RetrocederColumna:
     dec cursorCol
 PintarEspacio:
+    mov dirtyFlag, 1
     call IndiceCursor
     mov textBuffer[di], ' '
     mov al, currentAttr
@@ -257,6 +281,7 @@ LimpiarBuffer PROC NEAR
     mov al, TEXT_ATTR
     mov cx, BUFFER_SIZE
     rep stosb
+    mov dirtyFlag, 0
     pop es
     pop di
     pop cx
@@ -300,14 +325,310 @@ DibujarEditor PROC NEAR
     mov si, OFFSET hintLine
     mov bl, 0Ah
     call ImprimirCadena
-    mov dh, 24
-    mov dl, 1
-    mov si, OFFSET statusLine
-    mov bl, 0Eh
-    call ImprimirCadena
+    call ActualizarEstado
     call PintarBuffer
     ret
 DibujarEditor ENDP
+
+; Barra de estado: archivo, cambios pendientes, fila, columna y colores activos.
+ActualizarEstado PROC NEAR
+    push ax
+    push bx
+    push dx
+    push si
+    mov dh, 24
+    mov dl, 0
+    mov si, OFFSET emptyLine
+    mov bl, 17h
+    call ImprimirCadena
+    mov dh, 24
+    mov dl, 0
+    mov si, OFFSET activeName
+    mov bl, 0Eh
+    call ImprimirCadena
+    mov dh, 24
+    mov dl, 14
+    cmp dirtyFlag, 0
+    je  EstadoLimpio
+    mov si, OFFSET dirtyText
+    jmp ImprimirMarca
+EstadoLimpio:
+    mov si, OFFSET cleanText
+ImprimirMarca:
+    mov bl, 0Ch
+    call ImprimirCadena
+    mov dh, 24
+    mov dl, 17
+    mov si, OFFSET labelFila
+    mov bl, 0Fh
+    call ImprimirCadena
+    mov al, cursorRow
+    sub al, EDIT_TOP-1
+    mov dh, 24
+    mov dl, 19
+    call ImprimirNumero2
+    mov dh, 24
+    mov dl, 23
+    mov si, OFFSET labelCol
+    mov bl, 0Fh
+    call ImprimirCadena
+    mov al, cursorCol
+    inc al
+    mov dh, 24
+    mov dl, 25
+    call ImprimirNumero2
+    mov dh, 24
+    mov dl, 29
+    mov si, OFFSET labelText
+    mov bl, 0Fh
+    call ImprimirCadena
+    mov al, currentAttr
+    and al, 0Fh
+    mov dh, 24
+    mov dl, 31
+    call ImprimirNumero2
+    mov dh, 24
+    mov dl, 35
+    mov si, OFFSET labelBack
+    mov bl, 0Fh
+    call ImprimirCadena
+    mov al, currentAttr
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    mov dh, 24
+    mov dl, 37
+    call ImprimirNumero2
+    pop si
+    pop dx
+    pop bx
+    pop ax
+    ret
+ActualizarEstado ENDP
+
+; Imprime AL como dos digitos en DH:DL, con atributo amarillo.
+ImprimirNumero2 PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    xor ah, ah
+    mov bl, 10
+    div bl
+    push ax
+    add al, '0'
+    mov ah, 09h
+    mov bh, 0
+    mov bl, 0Eh
+    mov cx, 1
+    int 10h
+    pop ax
+    inc dl
+    mov al, ah
+    add al, '0'
+    mov ah, 09h
+    mov bh, 0
+    mov bl, 0Eh
+    mov cx, 1
+    int 10h
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+ImprimirNumero2 ENDP
+
+; Navegador extra: deja en activeName el .EDT elegido. CF=0 si se eligio uno.
+; El menu principal puede llamar a esta rutina antes de cargar el archivo.
+NavegadorArchivos PROC NEAR
+    call CargarListaArchivos
+    mov ax, 0003h
+    int 10h
+    cmp fileCount, 0
+    jne MostrarLista
+    mov dh, 10
+    mov dl, 18
+    mov si, OFFSET noFilesText
+    mov bl, 0Ch
+    call ImprimirCadena
+    mov ah, 00h
+    int 16h
+    stc
+    ret
+MostrarLista:
+    mov fileIndex, 0
+RedibujarLista:
+    call DibujarNavegador
+EsperarArchivo:
+    mov ah, 00h
+    int 16h
+    cmp al, 27
+    je  CancelarArchivo
+    cmp al, 13
+    je  ElegirArchivo
+    cmp al, 0
+    jne EsperarArchivo
+    cmp ah, 48h
+    je  ArchivoArriba
+    cmp ah, 50h
+    je  ArchivoAbajo
+    jmp EsperarArchivo
+ArchivoArriba:
+    cmp fileIndex, 0
+    je  EsperarArchivo
+    dec fileIndex
+    jmp RedibujarLista
+ArchivoAbajo:
+    mov al, fileCount
+    dec al
+    cmp fileIndex, al
+    je  EsperarArchivo
+    inc fileIndex
+    jmp RedibujarLista
+ElegirArchivo:
+    call CopiarArchivoActivo
+    mov dirtyFlag, 0
+    clc
+    ret
+CancelarArchivo:
+    stc
+    ret
+NavegadorArchivos ENDP
+
+; Carga hasta diez coincidencias *.EDT usando FindFirst/FindNext de DOS.
+CargarListaArchivos PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    push si
+    push es
+    push ds
+    pop es
+    mov fileCount, 0
+    mov dx, OFFSET dtaBuffer
+    mov ah, 1Ah
+    int 21h
+    mov dx, OFFSET filePattern
+    xor cx, cx
+    mov ah, 4Eh
+    int 21h
+    jc  FinCarga
+SiguienteArchivo:
+    cmp fileCount, MAX_FILES
+    jae FinCarga
+    xor ax, ax
+    mov al, fileCount
+    mov bl, 13
+    mul bl
+    mov di, ax
+    add di, OFFSET fileList
+    mov si, OFFSET dtaBuffer+30  ; nombre ASCIIZ dentro del DTA
+    mov cx, 13
+    rep movsb
+    inc fileCount
+    mov ah, 4Fh
+    int 21h
+    jnc SiguienteArchivo
+FinCarga:
+    pop es
+    pop si
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+CargarListaArchivos ENDP
+
+DibujarNavegador PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push bp
+    mov ax, 0003h
+    int 10h
+    mov dh, 1
+    mov dl, 24
+    mov si, OFFSET browserTitle
+    mov bl, 1Fh
+    call ImprimirCadena
+    mov dh, 23
+    mov dl, 12
+    mov si, OFFSET browserHint
+    mov bl, 0Ah
+    call ImprimirCadena
+    xor bp, bp
+    mov si, OFFSET fileList
+    xor cx, cx
+    mov cl, fileCount
+    mov dh, 5
+LineaArchivo:
+    mov dl, 0
+    push si
+    mov si, OFFSET emptyLine
+    mov bl, 07h
+    call ImprimirCadena
+    pop si
+    mov ax, bp
+    cmp al, fileIndex
+    jne ArchivoNormal
+    mov dl, 1
+    push si
+    mov si, OFFSET selectMark
+    mov bl, 0Eh
+    call ImprimirCadena
+    pop si
+    mov bl, 1Eh
+    jmp ImprimirArchivo
+ArchivoNormal:
+    mov bl, 0Fh
+ImprimirArchivo:
+    mov dl, 4
+    call ImprimirCadena
+    add si, 13
+    inc bp
+    inc dh
+    loop LineaArchivo
+    pop bp
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+DibujarNavegador ENDP
+
+CopiarArchivoActivo PROC NEAR
+    push ax
+    push bx
+    push cx
+    push di
+    push si
+    push es
+    push ds
+    pop es
+    xor ax, ax
+    mov al, fileIndex
+    mov bl, 13
+    mul bl
+    mov si, ax
+    add si, OFFSET fileList
+    mov di, OFFSET activeName
+    mov cx, 13
+    rep movsb
+    pop es
+    pop si
+    pop di
+    pop cx
+    pop bx
+    pop ax
+    ret
+CopiarArchivoActivo ENDP
 
 ; Pinta el texto y los atributos guardados, conservando la posicion del cursor.
 PintarBuffer PROC NEAR
@@ -627,6 +948,7 @@ EscribirCaracter PROC NEAR
     mov textBuffer[di], al
     mov bl, currentAttr
     mov attrBuffer[di], bl
+    mov dirtyFlag, 1
     cmp cursorCol, 79
     jne AvanzarColumna
     cmp cursorRow, EDIT_BOTTOM
