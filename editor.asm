@@ -1,5 +1,5 @@
 ; Proyecto 1 - Arquitectura y Diseno de Computadoras
-; Avance aproximado: 90% de la pantalla de edicion (x8086 / MASM-TASM)
+; Pantalla de edicion terminada (x8086 / MASM-TASM)
 ;
 ; Implementado:
 ;   - Marco visual y area editable de 80x25.
@@ -9,9 +9,10 @@
 ;   - Alt+M y Alt+N para alternar color de texto y fondo nuevo.
 ;   - Alt+I y Alt+J para insertar dos imagenes pixel art.
 ;   - Alt+H muestra la ayuda; Alt+S retorna AL=1 para que el menu guarde.
+;   - Alt+B busca y reemplaza todas las coincidencias del documento.
 ;   - ESC retorna al procedimiento que llama al editor.
 ;
-; Pendiente: integracion de archivos y buscar/reemplazar (Alt+B).
+; La creacion, apertura y escritura del archivo se conectan desde el menu.
 
 .model small
 .stack 100h
@@ -30,8 +31,12 @@ help1       db 'ATAJOS DEL EDITOR', 0
 help2       db 'Alt+C  Centrar cursor       Alt+U / Alt+D  Ir arriba / abajo', 0
 help3       db 'Alt+M  Alternar color letra Alt+N          Alternar color fondo', 0
 help4       db 'Alt+I  Insertar imagen 1    Alt+J          Insertar imagen 2', 0
-help5       db 'Alt+S  Guardar y salir      ESC            Volver sin guardar', 0
-help6       db 'Flechas para mover; Backspace para borrar.  Presione una tecla...', 0
+help5       db 'Alt+B  Buscar y reemplazar  Alt+S          Guardar y salir', 0
+help6       db 'Flechas para mover; Backspace para borrar.  ESC vuelve sin guardar.', 0
+help7       db 'Presione una tecla para volver al documento...', 0
+findLabel   db 'Buscar: ', 0
+replaceLabel db 'Reemplazar con: ', 0
+replaceNote db 'El reemplazo ocupa el mismo espacio que la palabra buscada.', 0
 img1        db '  ^  ', ' /#\ ', '/###\'
 img2        db ' [*] ', '[###]', ' [#] '
 cursorRow   db EDIT_TOP
@@ -43,6 +48,11 @@ textColors  db 0Ch, 0Ah, 0Bh
 backColors  db 00h, 10h, 30h      ; negro, azul y cyan
 textBuffer  db BUFFER_SIZE dup (' ')
 attrBuffer  db BUFFER_SIZE dup (TEXT_ATTR)
+findInput   db 15, 0, 15 dup (0) ; formato de entrada DOS AH=0Ah
+replaceInput db 15, 0, 15 dup (0)
+findLen     db 0
+replaceLen  db 0
+searchLimit dw 0
 
 .code
 main PROC
@@ -92,6 +102,8 @@ TeclaExtendida:
     je  InsertarImagen1
     cmp ah, 24h                   ; Alt+J
     je  InsertarImagen2
+    cmp ah, 30h                   ; Alt+B
+    je  BuscarYReemplazar
     cmp ah, 2Eh                   ; Alt+C
     je  CentrarCursor
     cmp ah, 16h                   ; Alt+U
@@ -186,6 +198,10 @@ InsertarImagen1:
 InsertarImagen2:
     mov si, OFFSET img2
     call InsertarImagen
+    jmp LeerTecla
+
+BuscarYReemplazar:
+    call BuscarReemplazar
     jmp LeerTecla
 
 AbrirAyuda:
@@ -421,6 +437,11 @@ MostrarAyuda PROC NEAR
     mov si, OFFSET help6
     mov bl, 0Ah
     call ImprimirCadena
+    mov dh, 20
+    mov dl, 12
+    mov si, OFFSET help7
+    mov bl, 0Eh
+    call ImprimirCadena
     mov ah, 00h
     int 16h
     mov ax, 0003h
@@ -428,6 +449,128 @@ MostrarAyuda PROC NEAR
     call DibujarEditor
     ret
 MostrarAyuda ENDP
+
+; Solicita dos palabras con la entrada DOS y redibuja el documento al terminar.
+BuscarReemplazar PROC NEAR
+    mov ax, 0003h
+    int 10h
+    mov dh, 7
+    mov dl, 5
+    mov si, OFFSET findLabel
+    mov bl, 0Fh
+    call ImprimirCadena
+    mov dh, 7
+    mov dl, 13
+    call ColocarCursorDirecto
+    mov dx, OFFSET findInput
+    mov ah, 0Ah
+    int 21h
+    mov al, findInput+1
+    mov findLen, al
+
+    mov dh, 10
+    mov dl, 5
+    mov si, OFFSET replaceLabel
+    mov bl, 0Fh
+    call ImprimirCadena
+    mov dh, 10
+    mov dl, 21
+    call ColocarCursorDirecto
+    mov dx, OFFSET replaceInput
+    mov ah, 0Ah
+    int 21h
+    mov al, replaceInput+1
+    cmp al, findLen               ; se conserva el ancho del documento
+    jbe LongitudValida
+    mov al, findLen
+LongitudValida:
+    mov replaceLen, al
+
+    mov dh, 14
+    mov dl, 5
+    mov si, OFFSET replaceNote
+    mov bl, 0Eh
+    call ImprimirCadena
+    call ReemplazarCoincidencias
+    mov ax, 0003h
+    int 10h
+    call DibujarEditor
+    ret
+BuscarReemplazar ENDP
+
+; Reemplaza todas las apariciones. Las palabras cortas se completan con espacios
+; para conservar la matriz fija de 19x80 que usa la pantalla.
+ReemplazarCoincidencias PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    push si
+    cmp findLen, 0
+    je  FinReemplazo
+    xor ax, ax
+    mov al, findLen
+    mov bx, BUFFER_SIZE
+    sub bx, ax
+    mov searchLimit, bx
+    xor si, si
+BuscarSiguiente:
+    cmp si, searchLimit
+    ja  FinReemplazo
+    mov di, si
+    mov bx, OFFSET findInput+2
+    xor cx, cx
+    mov cl, findLen
+CompararLetra:
+    mov al, textBuffer[di]
+    cmp al, [bx]
+    jne SinCoincidencia
+    inc di
+    inc bx
+    loop CompararLetra
+
+    mov di, si
+    mov bx, OFFSET replaceInput+2
+    xor cx, cx
+    mov cl, replaceLen
+CopiarReemplazo:
+    jcxz CompletarEspacios
+    mov al, [bx]
+    mov textBuffer[di], al
+    mov al, currentAttr
+    mov attrBuffer[di], al
+    inc di
+    inc bx
+    loop CopiarReemplazo
+CompletarEspacios:
+    xor cx, cx
+    mov cl, findLen
+    sub cl, replaceLen
+RellenarEspacio:
+    jcxz AvanzarCoincidencia
+    mov textBuffer[di], ' '
+    mov al, currentAttr
+    mov attrBuffer[di], al
+    inc di
+    loop RellenarEspacio
+AvanzarCoincidencia:
+    xor ax, ax
+    mov al, findLen
+    add si, ax
+    jmp BuscarSiguiente
+SinCoincidencia:
+    inc si
+    jmp BuscarSiguiente
+FinReemplazo:
+    pop si
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+ReemplazarCoincidencias ENDP
 
 ; Entrada AL. CF=0 si el caracter se puede escribir; CF=1 si no.
 EsCaracterPermitido PROC NEAR
@@ -505,6 +648,14 @@ ColocarCursor PROC NEAR
     int 10h
     ret
 ColocarCursor ENDP
+
+; Posiciona el cursor usando directamente DH=fila y DL=columna.
+ColocarCursorDirecto PROC NEAR
+    mov ah, 02h
+    mov bh, 0
+    int 10h
+    ret
+ColocarCursorDirecto ENDP
 
 ; Entrada: DH=fila, DL=columna, DS:SI=cadena terminada en 0, BL=atributo.
 ImprimirCadena PROC NEAR
