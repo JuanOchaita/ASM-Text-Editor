@@ -98,9 +98,13 @@ LeerTecla:
     mov ah, 00h
     int 16h
     cmp al, 27                    ; ESC
-    je  SalirSinGuardar
+    jne NoSalirSinGuardar
+    jmp SalirSinGuardar
+NoSalirSinGuardar:
     cmp al, 8                     ; Backspace
-    je  BorrarAnterior
+    jne NoBorrarAnterior
+    jmp BorrarAnterior
+NoBorrarAnterior:
     cmp al, 0
     je  TeclaExtendida
     call EsCaracterPermitido
@@ -111,25 +115,45 @@ LeerTecla:
 TeclaExtendida:
     ; Alt + letra se recibe como AL=0 y AH=el scan code de la letra.
     cmp ah, 1Fh                   ; Alt+S
-    je  GuardarSalir
+    jne NoAltS
+    jmp GuardarSalir
+NoAltS:
     cmp ah, 23h                   ; Alt+H
-    je  AbrirAyuda
+    jne NoAltH
+    jmp AbrirAyuda
+NoAltH:
     cmp ah, 32h                   ; Alt+M
-    je  CambiarTexto
+    jne NoAltM
+    jmp CambiarTexto
+NoAltM:
     cmp ah, 31h                   ; Alt+N
-    je  CambiarFondo
+    jne NoAltN
+    jmp CambiarFondo
+NoAltN:
     cmp ah, 17h                   ; Alt+I
-    je  InsertarImagen1
+    jne NoAltI
+    jmp InsertarImagen1
+NoAltI:
     cmp ah, 24h                   ; Alt+J
-    je  InsertarImagen2
+    jne NoAltJ
+    jmp InsertarImagen2
+NoAltJ:
     cmp ah, 30h                   ; Alt+B
-    je  BuscarYReemplazar
+    jne NoAltB
+    jmp BuscarYReemplazar
+NoAltB:
     cmp ah, 2Eh                   ; Alt+C
-    je  CentrarCursor
+    jne NoAltC
+    jmp CentrarCursor
+NoAltC:
     cmp ah, 16h                   ; Alt+U
-    je  IrArriba
+    jne NoAltU
+    jmp IrArriba
+NoAltU:
     cmp ah, 20h                   ; Alt+D
-    je  IrAbajo
+    jne NoAltD
+    jmp IrAbajo
+NoAltD:
     cmp ah, 48h                   ; flecha arriba
     je  Subir
     cmp ah, 50h                   ; flecha abajo
@@ -142,19 +166,25 @@ TeclaExtendida:
 
 Subir:
     cmp cursorRow, EDIT_TOP
-    je  LeerTecla
+    jne PuedeSubir
+    jmp LeerTecla
+PuedeSubir:
     dec cursorRow
     jmp LeerTecla
 Bajar:
     cmp cursorRow, EDIT_BOTTOM
-    je  LeerTecla
+    jne PuedeBajar
+    jmp LeerTecla
+PuedeBajar:
     inc cursorRow
     jmp LeerTecla
 Izquierda:
     cmp cursorCol, 0
     jne MoverIzquierda
     cmp cursorRow, EDIT_TOP
-    je  LeerTecla
+    jne PuedeIrIzquierda
+    jmp LeerTecla
+PuedeIrIzquierda:
     dec cursorRow
     mov cursorCol, 79
     jmp LeerTecla
@@ -165,7 +195,9 @@ Derecha:
     cmp cursorCol, 79
     jne MoverDerecha
     cmp cursorRow, EDIT_BOTTOM
-    je  LeerTecla
+    jne PuedeIrDerecha
+    jmp LeerTecla
+PuedeIrDerecha:
     inc cursorRow
     mov cursorCol, 0
     jmp LeerTecla
@@ -236,7 +268,9 @@ BorrarAnterior:
     cmp cursorCol, 0
     jne RetrocederColumna
     cmp cursorRow, EDIT_TOP
-    je  LeerTecla
+    jne PuedeBorrar
+    jmp LeerTecla
+PuedeBorrar:
     dec cursorRow
     mov cursorCol, 79
     jmp PintarEspacio
