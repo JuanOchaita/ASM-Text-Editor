@@ -5,11 +5,11 @@
 ;   - Marco visual y area editable de 80x25.
 ;   - Escritura: letras, numeros, espacio, coma, punto y dos puntos.
 ;   - Flechas y Backspace, limitados al area de texto.
-;   - Alt+C (centrar), Alt+U (primer renglon) y Alt+D (ultimo renglon).
-;   - Alt+M y Alt+N para alternar color de texto y fondo nuevo.
-;   - Alt+I y Alt+J para insertar dos imagenes pixel art.
-;   - Alt+H muestra la ayuda; Alt+S retorna AL=1 para que el menu guarde.
-;   - Alt+B busca y reemplaza todas las coincidencias del documento.
+;   - TAB+C (centrar), TAB+U (primer renglon) y TAB+D (ultimo renglon).
+;   - TAB+M y TAB+N para alternar color de texto y fondo nuevo.
+;   - TAB+I y TAB+J para insertar dos imagenes pixel art.
+;   - TAB+H muestra la ayuda; TAB+S retorna AL=1 para que el menu guarde.
+;   - TAB+B busca y reemplaza todas las coincidencias del documento.
 ;   - ESC retorna al procedimiento que llama al editor.
 ;
 ; La creacion, apertura y escritura del archivo se conectan desde el menu.
@@ -27,7 +27,7 @@ MAX_FILES   EQU 10
 .data
 titleLine   db '  BLOC DE NOTAS VGA', 0
 borderLine  db '----------------------------------------', 0
-hintLine    db 'H ayuda M/N color I/J img S guarda', 0
+hintLine    db 'TAB+H ayuda TAB+M/N color TAB+S guarda', 0
 statusLine  db 'Bloc de notas: EDITANDO', 0
 emptyLine   db EDIT_COLS dup (' '), 0
 activeName  db 'DOCUMENT.EDT', 0  ; nombre activo, actualizado por el navegador
@@ -38,10 +38,10 @@ labelCol    db 'C:', 0
 labelText   db 'T:', 0
 labelBack   db 'B:', 0
 help1       db 'BLOC DE NOTAS VGA', 0
-help2       db 'C: centro   U/D: arriba/abajo', 0
-help3       db 'M: letra    N: fondo', 0
-help4       db 'I/J: imagen 1/2', 0
-help5       db 'B: buscar   S: guardar', 0
+help2       db 'TAB+C centro TAB+U/D arriba/abajo', 0
+help3       db 'TAB+M letra TAB+N fondo', 0
+help4       db 'TAB+I/J imagen 1/2', 0
+help5       db 'TAB+B busca TAB+S guarda', 0
 help6       db 'Flechas y Backspace editan.', 0
 help7       db 'Presione una tecla para volver.', 0
 findLabel   db 'Buscar: ', 0
@@ -65,6 +65,7 @@ findLen     db 0
 replaceLen  db 0
 searchLimit dw 0
 dirtyFlag   db 0
+commandMode db 0                  ; 1 despues de TAB: la siguiente letra es comando
 dtaBuffer   db 128 dup (0)
 filePattern db '*.EDT', 0
 fileList    db MAX_FILES * 13 dup (0)
@@ -87,6 +88,7 @@ main ENDP
 
 ; Tema tomado de la rama Menu: borde azul oscuro y panel morado en modo 13h.
 TemaMenuVGA PROC NEAR
+    push bx                         ; conservar el color solicitado en BL
     push ax
     push cx
     push dx
@@ -134,6 +136,7 @@ RellenarPanelMenu:
     pop dx
     pop cx
     pop ax
+    pop bx
     ret
 TemaMenuVGA ENDP
 
@@ -151,6 +154,55 @@ LeerTecla:
     call ColocarCursor
     mov ah, 00h
     int 16h
+    cmp al, 9                     ; TAB abre una orden de una letra
+    jne RevisarComandoTab
+    mov commandMode, 1
+    jmp LeerTecla
+RevisarComandoTab:
+    cmp commandMode, 1
+    jne TeclaNormal
+    mov commandMode, 0
+    or  al, 20h                   ; acepta mayusculas o minusculas
+    cmp al, 's'
+    jne TabNoS
+    jmp GuardarSalir
+TabNoS:
+    cmp al, 'h'
+    jne TabNoH
+    jmp AbrirAyuda
+TabNoH:
+    cmp al, 'm'
+    jne TabNoM
+    jmp CambiarTexto
+TabNoM:
+    cmp al, 'n'
+    jne TabNoN
+    jmp CambiarFondo
+TabNoN:
+    cmp al, 'i'
+    jne TabNoI
+    jmp InsertarImagen1
+TabNoI:
+    cmp al, 'j'
+    jne TabNoJ
+    jmp InsertarImagen2
+TabNoJ:
+    cmp al, 'b'
+    jne TabNoB
+    jmp BuscarYReemplazar
+TabNoB:
+    cmp al, 'c'
+    jne TabNoC
+    jmp CentrarCursor
+TabNoC:
+    cmp al, 'u'
+    jne TabNoU
+    jmp IrArriba
+TabNoU:
+    cmp al, 'd'
+    jne TeclaNormal
+    jmp IrAbajo
+TeclaNormal:
     cmp al, 27                    ; ESC
     jne NoSalirSinGuardar
     jmp SalirSinGuardar
@@ -167,47 +219,7 @@ NoBorrarAnterior:
     jmp LeerTecla
 
 TeclaExtendida:
-    ; Alt + letra se recibe como AL=0 y AH=el scan code de la letra.
-    cmp ah, 1Fh                   ; Alt+S
-    jne NoAltS
-    jmp GuardarSalir
-NoAltS:
-    cmp ah, 23h                   ; Alt+H
-    jne NoAltH
-    jmp AbrirAyuda
-NoAltH:
-    cmp ah, 32h                   ; Alt+M
-    jne NoAltM
-    jmp CambiarTexto
-NoAltM:
-    cmp ah, 31h                   ; Alt+N
-    jne NoAltN
-    jmp CambiarFondo
-NoAltN:
-    cmp ah, 17h                   ; Alt+I
-    jne NoAltI
-    jmp InsertarImagen1
-NoAltI:
-    cmp ah, 24h                   ; Alt+J
-    jne NoAltJ
-    jmp InsertarImagen2
-NoAltJ:
-    cmp ah, 30h                   ; Alt+B
-    jne NoAltB
-    jmp BuscarYReemplazar
-NoAltB:
-    cmp ah, 2Eh                   ; Alt+C
-    jne NoAltC
-    jmp CentrarCursor
-NoAltC:
-    cmp ah, 16h                   ; Alt+U
-    jne NoAltU
-    jmp IrArriba
-NoAltU:
-    cmp ah, 20h                   ; Alt+D
-    jne NoAltD
-    jmp IrAbajo
-NoAltD:
+    ; Solo flechas: los comandos usan TAB + letra.
     cmp ah, 48h                   ; flecha arriba
     je  Subir
     cmp ah, 50h                   ; flecha abajo
@@ -333,13 +345,7 @@ PintarEspacio:
     mov textBuffer[di], ' '
     mov al, currentAttr
     mov attrBuffer[di], al
-    call ColocarCursor
-    mov al, ' '
-    mov ah, 09h
-    mov bh, 0
-    mov bl, currentAttr
-    mov cx, 1
-    int 10h
+    call LimpiarCeldaVGA
     jmp LeerTecla
 
 GuardarSalir:
@@ -499,20 +505,14 @@ ImprimirNumero2 PROC NEAR
     div bl
     push ax
     add al, '0'
-    mov ah, 09h
-    mov bh, 0
-    mov bl, 0Eh
-    mov cx, 1
-    int 10h
+    mov bl, 255
+    call DibujarGlifoVGA
     pop ax
     inc dl
     mov al, ah
     add al, '0'
-    mov ah, 09h
-    mov bh, 0
-    mov bl, 0Eh
-    mov cx, 1
-    int 10h
+    mov bl, 255
+    call DibujarGlifoVGA
     pop dx
     pop cx
     pop bx
@@ -729,15 +729,11 @@ PintarBuffer PROC NEAR
     xor di, di
     mov cx, BUFFER_SIZE
 PintarCelda:
-    call ColocarCursor
     mov al, textBuffer[di]
     mov bl, attrBuffer[di]
-    push cx
-    mov cx, 1
-    mov ah, 09h
-    mov bh, 0
-    int 10h
-    pop cx
+    mov dh, cursorRow
+    mov dl, cursorCol
+    call DibujarGlifoVGA
     inc di
     inc cursorCol
     cmp cursorCol, EDIT_COLS
@@ -781,13 +777,11 @@ ColumnaImagen:
     pop bx
     mov al, [si]
     mov textBuffer[di], al
-    mov attrBuffer[di], 0Eh
-    call ColocarCursor
-    mov ah, 09h
-    mov bh, 0
-    mov bl, 0Eh
-    mov cx, 1
-    int 10h
+    mov attrBuffer[di], 255
+    mov dh, cursorRow
+    mov dl, cursorCol
+    mov bl, 255
+    call DibujarGlifoVGA
     inc si
     inc cursorCol
     dec bx
@@ -1016,12 +1010,10 @@ EscribirCaracter PROC NEAR
     push bx
     push cx
     push dx
-    call ColocarCursor
-    mov ah, 09h
-    mov bh, 0
+    mov dh, cursorRow
+    mov dl, cursorCol
     mov bl, currentAttr
-    mov cx, 1
-    int 10h
+    call DibujarGlifoVGA
     pop dx
     pop cx
     pop bx
@@ -1048,23 +1040,18 @@ FinEscritura:
 EscribirCaracter ENDP
 
 ColocarCursor PROC NEAR
-    mov ah, 02h
-    mov bh, 0
-    mov dh, cursorRow
-    mov dl, cursorCol
-    int 10h
+    ; En modo 13h no existe cursor de texto de hardware.
+    ; El proximo caracter se dibuja en cursorRow/cursorCol.
     ret
 ColocarCursor ENDP
 
-; Posiciona el cursor usando directamente DH=fila y DL=columna.
+; En modo 13h las entradas DOS se muestran en el punto que dibuja la interfaz.
 ColocarCursorDirecto PROC NEAR
-    mov ah, 02h
-    mov bh, 0
-    int 10h
     ret
 ColocarCursorDirecto ENDP
 
-; Entrada: DH=fila, DL=columna, DS:SI=cadena terminada en 0, BL=atributo.
+; Entrada: DH=fila, DL=columna, DS:SI=cadena terminada en 0, BL=color 0..255.
+; Dibuja caracteres de 8x8 directamente en A000h; no usa texto BIOS en modo 13h.
 ImprimirCadena PROC NEAR
     push ax
     push bx
@@ -1074,21 +1061,15 @@ ImprimirCadena PROC NEAR
     push di
     push es
     push si
-    mov di, si
-    xor cx, cx
-ContarCaracter:
-    cmp byte ptr [di], 0
-    je  Imprimir
-    inc di
-    inc cx
-    jmp ContarCaracter
-Imprimir:
-    push ds
-    pop es                         ; AH=13h recibe la cadena en ES:BP
-    mov bp, si
-    mov ax, 1301h
-    mov bh, 0
-    int 10h
+SiguienteLetraVGA:
+    lodsb
+    or  al, al
+    jz  FinCadenaVGA
+    call DibujarGlifoVGA
+    inc dl
+    cmp dl, EDIT_COLS
+    jb  SiguienteLetraVGA
+FinCadenaVGA:
     pop si
     pop es
     pop di
@@ -1099,5 +1080,68 @@ Imprimir:
     pop ax
     ret
 ImprimirCadena ENDP
+
+; AL=ASCII, DH=fila, DL=columna, BL=color VGA (0..255).
+; BIOS dibuja el glifo de 8x8 en modo 13h; el fondo/panel si es por pixeles.
+DibujarGlifoVGA PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    mov ah, 02h                    ; posicion de caracteres en VGA
+    mov bh, 0
+    int 10h
+    mov ah, 09h                    ; AL con color BL, una repeticion
+    mov bh, 0
+    mov cx, 1
+    int 10h
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+DibujarGlifoVGA ENDP
+
+; Limpia el bloque 8x8 de la celda actual con el color de fondo seleccionado.
+LimpiarCeldaVGA PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    push es
+    mov bl, currentBackColor
+    xor ax, ax
+    mov al, cursorRow
+    shl ax, 1
+    shl ax, 1
+    shl ax, 1
+    mov dx, 320
+    mul dx
+    xor dx, dx
+    mov dl, cursorCol
+    shl dx, 1
+    shl dx, 1
+    shl dx, 1
+    add ax, dx
+    mov di, ax
+    mov ax, 0A000h
+    mov es, ax
+    mov dx, 8
+FilaLimpiaVGA:
+    mov al, bl
+    mov cx, 8
+    rep stosb
+    add di, 312
+    dec dx
+    jnz FilaLimpiaVGA
+    pop es
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+LimpiarCeldaVGA ENDP
 
 END main
