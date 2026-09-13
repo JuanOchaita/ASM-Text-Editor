@@ -1,5 +1,5 @@
 ; Proyecto 1 - Arquitectura y Diseno de Computadoras
-; Pantalla de edicion terminada (x8086 / MASM-TASM)
+; Pantalla de edicion VGA 320x200x256 (modo 13h, x8086 / MASM-TASM)
 ;
 ; Implementado:
 ;   - Marco visual y area editable de 80x25.
@@ -19,16 +19,17 @@
 
 EDIT_TOP    EQU 3
 EDIT_BOTTOM EQU 21
-TEXT_ATTR   EQU 0Ch               ; rojo inicial; Alt+M rota rojo, verde y cyan
-BUFFER_SIZE EQU 1520              ; 19 renglones x 80 columnas
+EDIT_COLS   EQU 40               ; 320 pixeles / fuente BIOS de 8 pixeles
+TEXT_ATTR   EQU 255               ; blanco: indice VGA dentro de 0..255
+BUFFER_SIZE EQU 760               ; 19 renglones x 40 columnas
 MAX_FILES   EQU 10
 
 .data
-titleLine   db '  EDITOR DE TEXTO  |  Documento sin guardar', 0
-borderLine  db '--------------------------------------------------------------------------------', 0
-hintLine    db 'Alt+H: ayuda | Alt+M/N: colores | Alt+I/J: imagenes | Alt+S: guardar', 0
-statusLine  db 'Estado: EDITANDO  |  ESC: volver sin guardar', 0
-emptyLine   db 80 dup (' '), 0
+titleLine   db '  BLOC DE NOTAS VGA', 0
+borderLine  db '----------------------------------------', 0
+hintLine    db 'H ayuda M/N color I/J img S guarda', 0
+statusLine  db 'Bloc de notas: EDITANDO', 0
+emptyLine   db EDIT_COLS dup (' '), 0
 activeName  db 'DOCUMENT.EDT', 0  ; nombre activo, actualizado por el navegador
 dirtyText   db '*', 0
 cleanText   db ' ', 0
@@ -36,13 +37,13 @@ labelFila   db 'F:', 0
 labelCol    db 'C:', 0
 labelText   db 'T:', 0
 labelBack   db 'B:', 0
-help1       db 'ATAJOS DEL EDITOR', 0
-help2       db 'Alt+C  Centrar cursor       Alt+U / Alt+D  Ir arriba / abajo', 0
-help3       db 'Alt+M  Alternar color letra Alt+N          Alternar color fondo', 0
-help4       db 'Alt+I  Insertar imagen 1    Alt+J          Insertar imagen 2', 0
-help5       db 'Alt+B  Buscar y reemplazar  Alt+S          Guardar y salir', 0
-help6       db 'Flechas para mover; Backspace para borrar.  ESC vuelve sin guardar.', 0
-help7       db 'Presione una tecla para volver al documento...', 0
+help1       db 'BLOC DE NOTAS VGA', 0
+help2       db 'C: centro   U/D: arriba/abajo', 0
+help3       db 'M: letra    N: fondo', 0
+help4       db 'I/J: imagen 1/2', 0
+help5       db 'B: buscar   S: guardar', 0
+help6       db 'Flechas y Backspace editan.', 0
+help7       db 'Presione una tecla para volver.', 0
 findLabel   db 'Buscar: ', 0
 replaceLabel db 'Reemplazar con: ', 0
 replaceNote db 'El reemplazo ocupa el mismo espacio que la palabra buscada.', 0
@@ -50,11 +51,12 @@ img1        db '  ^  ', ' /#\ ', '/###\'
 img2        db ' [*] ', '[###]', ' [#] '
 cursorRow   db EDIT_TOP
 cursorCol   db 0
-currentAttr db TEXT_ATTR
+currentAttr db TEXT_ATTR          ; color de letra VGA, 0..255
+currentBackColor db 1             ; color de fondo VGA, 0..255
 textColorIx db 0
 backColorIx db 0
-textColors  db 0Ch, 0Ah, 0Bh
-backColors  db 00h, 10h, 30h      ; negro, azul y cyan
+textColors  db 255, 28, 15        ; blanco, rosa, blanco brillante
+backColors  db 1, 0, 28           ; morado, contorno, rosa
 textBuffer  db BUFFER_SIZE dup (' ')
 attrBuffer  db BUFFER_SIZE dup (TEXT_ATTR)
 findInput   db 15, 0, 15 dup (0) ; formato de entrada DOS AH=0Ah
@@ -68,8 +70,8 @@ filePattern db '*.EDT', 0
 fileList    db MAX_FILES * 13 dup (0)
 fileCount   db 0
 fileIndex   db 0
-browserTitle db 'NAVEGADOR DE ARCHIVOS .EDT', 0
-browserHint db 'Flechas: seleccionar   Enter: abrir   ESC: cancelar', 0
+browserTitle db 'NAVEGADOR .EDT', 0
+browserHint db 'Flechas Enter abre ESC sale', 0
 noFilesText db 'No hay archivos .EDT en esta carpeta.', 0
 selectMark  db '>', 0
 
@@ -83,9 +85,61 @@ main PROC
     int 21h
 main ENDP
 
+; Tema tomado de la rama Menu: borde azul oscuro y panel morado en modo 13h.
+TemaMenuVGA PROC NEAR
+    push ax
+    push cx
+    push dx
+    push di
+    push es
+    mov dx, 03C8h
+    xor al, al
+    out dx, al
+    mov dx, 03C9h                 ; paleta 0: azul muy oscuro
+    mov al, 8
+    out dx, al
+    mov al, 8
+    out dx, al
+    mov al, 16
+    out dx, al
+    mov dx, 03C8h
+    mov al, 1
+    out dx, al
+    mov dx, 03C9h                 ; paleta 1: morado de Menu
+    mov al, 24
+    out dx, al
+    mov al, 20
+    out dx, al
+    mov al, 28
+    out dx, al
+    mov ax, 0A000h
+    mov es, ax
+    xor di, di
+    xor al, al
+    mov cx, 64000
+    cld
+    rep stosb
+    mov di, 14*320+4
+    mov cx, 182
+RellenarPanelMenu:
+    push cx
+    mov cx, 312
+    mov al, 1
+    rep stosb
+    pop cx
+    add di, 8
+    loop RellenarPanelMenu
+    pop es
+    pop di
+    pop dx
+    pop cx
+    pop ax
+    ret
+TemaMenuVGA ENDP
+
 ; Se puede llamar desde el menu principal en vez de usar main directamente.
 PantallaEdicion PROC NEAR
-    mov ax, 0003h                 ; modo texto 80x25 y limpiar pantalla
+    mov ax, 0013h                 ; VGA: 320x200, 256 colores
     int 10h
 
     call DibujarEditor
@@ -186,13 +240,13 @@ Izquierda:
     jmp LeerTecla
 PuedeIrIzquierda:
     dec cursorRow
-    mov cursorCol, 79
+    mov cursorCol, EDIT_COLS-1
     jmp LeerTecla
 MoverIzquierda:
     dec cursorCol
     jmp LeerTecla
 Derecha:
-    cmp cursorCol, 79
+    cmp cursorCol, EDIT_COLS-1
     jne MoverDerecha
     cmp cursorRow, EDIT_BOTTOM
     jne PuedeIrDerecha
@@ -206,7 +260,7 @@ MoverDerecha:
     jmp LeerTecla
 
 CentrarCursor:
-    mov cursorCol, 40
+    mov cursorCol, EDIT_COLS/2
     jmp LeerTecla
 IrArriba:
     mov cursorRow, EDIT_TOP
@@ -223,9 +277,7 @@ CambiarTexto:
 AplicarTexto:
     xor bx, bx
     mov bl, textColorIx
-    mov al, currentAttr
-    and al, 0F0h
-    or  al, textColors[bx]
+    mov al, textColors[bx]
     mov currentAttr, al
     jmp LeerTecla
 
@@ -237,10 +289,9 @@ CambiarFondo:
 AplicarFondo:
     xor bx, bx
     mov bl, backColorIx
-    mov al, currentAttr
-    and al, 0Fh
-    or  al, backColors[bx]
-    mov currentAttr, al
+    mov al, backColors[bx]
+    mov currentBackColor, al
+    call DibujarEditor
     jmp LeerTecla
 
 InsertarImagen1:
@@ -272,7 +323,7 @@ BorrarAnterior:
     jmp LeerTecla
 PuedeBorrar:
     dec cursorRow
-    mov cursorCol, 79
+    mov cursorCol, EDIT_COLS-1
     jmp PintarEspacio
 RetrocederColumna:
     dec cursorCol
@@ -328,7 +379,7 @@ IndiceCursor PROC NEAR
     xor ax, ax
     mov al, cursorRow
     sub al, EDIT_TOP
-    mov bl, 80
+    mov bl, EDIT_COLS
     mul bl
     xor bx, bx
     mov bl, cursorCol
@@ -339,6 +390,7 @@ IndiceCursor ENDP
 
 ; Vuelve a dibujar el marco sin borrar los buffers.
 DibujarEditor PROC NEAR
+    call TemaMenuVGA
     mov dh, 0
     mov dl, 0
     mov si, OFFSET titleLine
@@ -417,7 +469,6 @@ ImprimirMarca:
     mov bl, 0Fh
     call ImprimirCadena
     mov al, currentAttr
-    and al, 0Fh
     mov dh, 24
     mov dl, 31
     call ImprimirNumero2
@@ -426,11 +477,7 @@ ImprimirMarca:
     mov si, OFFSET labelBack
     mov bl, 0Fh
     call ImprimirCadena
-    mov al, currentAttr
-    shr al, 1
-    shr al, 1
-    shr al, 1
-    shr al, 1
+    mov al, currentBackColor
     mov dh, 24
     mov dl, 37
     call ImprimirNumero2
@@ -477,8 +524,9 @@ ImprimirNumero2 ENDP
 ; El menu principal puede llamar a esta rutina antes de cargar el archivo.
 NavegadorArchivos PROC NEAR
     call CargarListaArchivos
-    mov ax, 0003h
+    mov ax, 0013h
     int 10h
+    call TemaMenuVGA
     cmp fileCount, 0
     jne MostrarLista
     mov dh, 10
@@ -584,8 +632,9 @@ DibujarNavegador PROC NEAR
     push dx
     push si
     push bp
-    mov ax, 0003h
+    mov ax, 0013h
     int 10h
+    call TemaMenuVGA
     mov dh, 1
     mov dl, 24
     mov si, OFFSET browserTitle
@@ -691,7 +740,7 @@ PintarCelda:
     pop cx
     inc di
     inc cursorCol
-    cmp cursorCol, 80
+    cmp cursorCol, EDIT_COLS
     jb  SiguienteCelda
     mov cursorCol, 0
     inc cursorRow
@@ -721,7 +770,7 @@ InsertarImagen PROC NEAR
     push ax
     cmp cursorRow, 19             ; se necesitan tres renglones disponibles
     ja  FinImagen
-    cmp cursorCol, 75
+    cmp cursorCol, EDIT_COLS-5
     ja  FinImagen
     mov bp, 3
 FilaImagen:
@@ -760,8 +809,9 @@ FinImagen:
 InsertarImagen ENDP
 
 MostrarAyuda PROC NEAR
-    mov ax, 0003h
+    mov ax, 0013h
     int 10h
+    call TemaMenuVGA
     mov dh, 3
     mov dl, 25
     mov si, OFFSET help1
@@ -799,7 +849,7 @@ MostrarAyuda PROC NEAR
     call ImprimirCadena
     mov ah, 00h
     int 16h
-    mov ax, 0003h
+    mov ax, 0013h
     int 10h
     call DibujarEditor
     ret
@@ -807,8 +857,9 @@ MostrarAyuda ENDP
 
 ; Solicita dos palabras con la entrada DOS y redibuja el documento al terminar.
 BuscarReemplazar PROC NEAR
-    mov ax, 0003h
+    mov ax, 0013h
     int 10h
+    call TemaMenuVGA
     mov dh, 7
     mov dl, 5
     mov si, OFFSET findLabel
@@ -847,7 +898,7 @@ LongitudValida:
     mov bl, 0Eh
     call ImprimirCadena
     call ReemplazarCoincidencias
-    mov ax, 0003h
+    mov ax, 0013h
     int 10h
     call DibujarEditor
     ret
@@ -983,7 +1034,7 @@ EscribirCaracter PROC NEAR
     mov bl, currentAttr
     mov attrBuffer[di], bl
     mov dirtyFlag, 1
-    cmp cursorCol, 79
+    cmp cursorCol, EDIT_COLS-1
     jne AvanzarColumna
     cmp cursorRow, EDIT_BOTTOM
     je  FinEscritura
