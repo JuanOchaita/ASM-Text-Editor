@@ -3,6 +3,11 @@
 
 .DATA
 
+clickprev db 0
+
+windowEbuf db 4576 dup(0)
+windowEshown db 0
+
 ; Mouse Sprite
 MOUSESPRITED LABEL WORD
 KXMS dw 12
@@ -443,6 +448,107 @@ check_max_y:
     jle clamp_done
     mov iposyMS,181
 clamp_done:
+    test bl,1
+    jz no_button_down
+    jmp mouse_button_down
+no_button_down:
+    mov clickprev,0
+    jmp click_check_done
+
+mouse_button_down:
+    cmp clickprev,1
+    jne button_is_new
+    jmp click_check_done
+button_is_new:
+    mov clickprev,1
+
+    cmp windowEshown,1
+    jne check_openE_icon
+    jmp check_windowE_buttons
+
+check_openE_icon:
+    cmp iposxMS,307
+    jge openE_check_x2
+    jmp click_check_done
+openE_check_x2:
+    cmp iposxMS,317
+    jle openE_check_y1
+    jmp click_check_done
+openE_check_y1:
+    cmp iposyMS,3
+    jge openE_check_y2
+    jmp click_check_done
+openE_check_y2:
+    cmp iposyMS,13
+    jle openE_activate
+    jmp click_check_done
+
+openE_activate:
+    push offset windowEbuf
+    push iposyE
+    push iposxE
+    push KYE
+    push KXE
+    call SaveUnderCursor
+
+    push offset windowE
+    push iposyE
+    push iposxE
+    push KYE
+    push KXE
+    call DrawSprite
+
+    mov windowEshown,1
+    jmp click_check_done
+
+check_windowE_buttons:
+    cmp iposxMS,145
+    jge okbtn_check_x2
+    jmp check_close_icon
+okbtn_check_x2:
+    cmp iposxMS,173
+    jle okbtn_check_y1
+    jmp check_close_icon
+okbtn_check_y1:
+    cmp iposyMS,45
+    jge okbtn_check_y2
+    jmp check_close_icon
+okbtn_check_y2:
+    cmp iposyMS,109
+    jle okbtn_activate
+    jmp check_close_icon
+
+okbtn_activate:
+    jmp exit_loop
+
+check_close_icon:
+    cmp iposxMS,199
+    jge closeE_check_x2
+    jmp click_check_done
+closeE_check_x2:
+    cmp iposxMS,207
+    jle closeE_check_y1
+    jmp click_check_done
+closeE_check_y1:
+    cmp iposyMS,77
+    jge closeE_check_y2
+    jmp click_check_done
+closeE_check_y2:
+    cmp iposyMS,87
+    jle closeE_activate
+    jmp click_check_done
+
+closeE_activate:
+    push offset windowEbuf
+    push iposyE
+    push iposxE
+    push KYE
+    push KXE
+    call RestoreUnderCursor
+
+    mov windowEshown,0
+
+click_check_done:
 
     cmp mousedrawn,0
     je draw_new_cursor
