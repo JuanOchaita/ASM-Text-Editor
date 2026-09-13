@@ -30,6 +30,11 @@ db 255,255,0,0,0,0,255,28,28,255,0,0
 db 0,0,0,0,0,0,255,28,28,255,0,0
 db 0,0,0,0,0,0,0,255,255,0,0,0
 
+oldxMS dw 149
+oldyMS dw 85
+mousedrawn db 0
+mousebuf db 228 dup(0)
+
 ; New File Window Sprite
 KXN dw 104
 KYN dw 44
@@ -347,6 +352,9 @@ main PROC
     mov ax,0013h
     int 10h
 
+    mov ax,0000h
+    int 33h
+
     mov dx,03C8h
     xor al,al
     out dx,al
@@ -390,9 +398,6 @@ rellenar_fila:
     add di,320-312
     loop rellenar_fila
 
-    ; ---- Aquí ya no hay código repetido: solo llamadas ----
-
-    ; Ícono de salida
     push offset exit
     push iposyEI
     push iposxEI
@@ -400,7 +405,6 @@ rellenar_fila:
     push KXEI
     call DrawSprite
 
-    ; Título
     push offset titlespr
     push iposyT
     push iposxT
@@ -408,7 +412,6 @@ rellenar_fila:
     push KXT
     call DrawSprite
 
-    ; Ejemplo con tu nuevo bitmap "file"
     ;push offset file
     ;push iposyF
     ;push iposxF
@@ -416,30 +419,91 @@ rellenar_fila:
     ;push KXF
     ;call DrawSprite
 
-    xor ah,ah
+mouse_loop:
+    mov ax,0003h
+    int 33h
+    mov iposxMS,cx
+    mov iposyMS,dx
+
+    cmp iposxMS,0
+    jge check_max_x
+    mov iposxMS,0
+check_max_x:
+    mov ax,iposxMS
+    cmp ax,308
+    jle check_min_y
+    mov iposxMS,308
+check_min_y:
+    cmp iposyMS,0
+    jge check_max_y
+    mov iposyMS,0
+check_max_y:
+    mov ax,iposyMS
+    cmp ax,181
+    jle clamp_done
+    mov iposyMS,181
+clamp_done:
+
+    cmp mousedrawn,0
+    je draw_new_cursor
+
+    mov ax,iposxMS
+    cmp ax,oldxMS
+    jne cursor_moved
+    mov ax,iposyMS
+    cmp ax,oldyMS
+    je skip_cursor_update
+
+cursor_moved:
+    push offset mousebuf
+    push oldyMS
+    push oldxMS
+    push KYMS
+    push KXMS
+    call RestoreUnderCursor
+
+draw_new_cursor:
+    push offset mousebuf
+    push iposyMS
+    push iposxMS
+    push KYMS
+    push KXMS
+    call SaveUnderCursor
+
+    push offset mousesprite
+    push iposyMS
+    push iposxMS
+    push KYMS
+    push KXMS
+    call DrawSprite
+
+    mov ax,iposxMS
+    mov oldxMS,ax
+    mov ax,iposyMS
+    mov oldyMS,ax
+    mov mousedrawn,1
+
+skip_cursor_update:
+    mov ah,01h
     int 16h
+    jnz check_key
+    jmp mouse_loop
+check_key:
+    mov ah,00h
+    int 16h
+    cmp al,1Bh
+    je exit_loop
+    jmp mouse_loop
+exit_loop:
 
     mov ax,0003h
     int 10h
 
     mov ax,4C00h
     int 21h
+
 main ENDP
 
-; ==========================================================
-; DrawSprite: dibuja un bitmap en modo 0013h (320x200, 256 col)
-;
-; Parámetros (se empujan en este orden antes del CALL):
-;   push offset spriteData   (etiqueta db del bitmap)
-;   push posY                (word, ej. iposyF)
-;   push posX                (word, ej. iposxF)
-;   push height               (word, ej. KYF)
-;   push width                (word, ej. KXF)   <-- éste va último
-;   call DrawSprite
-;
-; El color 0 dentro del bitmap se trata como transparente
-; (no se dibuja), igual que hacía tu código original.
-; ==========================================================
 DrawSprite PROC
     push bp
     mov bp, sp
@@ -451,33 +515,26 @@ DrawSprite PROC
     push di
     push es
 
-    ; [bp+4]  = width
-    ; [bp+6]  = height
-    ; [bp+8]  = posx
-    ; [bp+10] = posy
-    ; [bp+12] = offset del bitmap
-
     mov ax, 0A000h
     mov es, ax
 
-    ; DI = posy*320 + posx
     mov ax, [bp+10]
     mov bx, 320
     mul bx
     add ax, [bp+8]
     mov di, ax
 
-    mov si, [bp+12]        ; puntero al bitmap
+    mov si, [bp+12]
 
-    mov ax, [bp+4]         ; width
+    mov ax, [bp+4]
     mov bx, 320
-    sub bx, ax             ; bx = salto de fila (320 - width)
+    sub bx, ax
 
-    mov cx, [bp+6]         ; height
+    mov cx, [bp+6]
 
 sprite_row_loop:
     push cx
-    mov cx, [bp+4]         ; width
+    mov cx, [bp+4]
 
 sprite_pixel_loop:
     lodsb
@@ -500,7 +557,115 @@ sprite_skip_pixel:
     pop bx
     pop ax
     pop bp
-    ret 10                 ; limpia los 5 words (10 bytes) que empujó el caller
+    ret 10
 DrawSprite ENDP
+
+SaveUnderCursor PROC
+    push bp
+    mov bp, sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+
+    mov ax, 0A000h
+    mov es, ax
+
+    mov ax, [bp+10]
+    mov bx, 320
+    mul bx
+    add ax, [bp+8]
+    mov si, ax
+
+    mov di, [bp+12]
+
+    mov ax, [bp+4]
+    mov bx, 320
+    sub bx, ax
+
+    mov cx, [bp+6]
+
+save_row_loop:
+    push cx
+    mov cx, [bp+4]
+
+save_pixel_loop:
+    mov al, es:[si]
+    mov [di], al
+    inc si
+    inc di
+    loop save_pixel_loop
+
+    pop cx
+    add si, bx
+    loop save_row_loop
+
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret 10
+SaveUnderCursor ENDP
+
+RestoreUnderCursor PROC
+    push bp
+    mov bp, sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+
+    mov ax, 0A000h
+    mov es, ax
+
+    mov ax, [bp+10]
+    mov bx, 320
+    mul bx
+    add ax, [bp+8]
+    mov di, ax
+
+    mov si, [bp+12]
+
+    mov ax, [bp+4]
+    mov bx, 320
+    sub bx, ax
+
+    mov cx, [bp+6]
+
+restore_row_loop:
+    push cx
+    mov cx, [bp+4]
+
+restore_pixel_loop:
+    mov al, [si]
+    mov es:[di], al
+    inc si
+    inc di
+    loop restore_pixel_loop
+
+    pop cx
+    add di, bx
+    loop restore_row_loop
+
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret 10
+RestoreUnderCursor ENDP
 
 END main
