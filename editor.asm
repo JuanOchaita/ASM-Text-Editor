@@ -9,6 +9,8 @@
 ;   - TAB+M y TAB+N para alternar color de texto y fondo nuevo.
 ;   - TAB+I y TAB+J para insertar dos imagenes pixel art.
 ;   - TAB+H muestra la ayuda; TAB+S retorna AL=1 para que el menu guarde.
+;   - TAB+O abre el navegador de archivos .EDT.
+;   - TAB+R regresa sin guardar.
 ;   - TAB+B busca y reemplaza todas las coincidencias del documento.
 ;   - ESC retorna al procedimiento que llama al editor.
 ;
@@ -24,6 +26,12 @@ TEXT_ATTR   EQU 255               ; blanco: indice VGA dentro de 0..255
 BUFFER_SIZE EQU 760               ; 19 renglones x 40 columnas
 MAX_FILES   EQU 10
 
+; Panel de edicion en pixeles: cubre justo los renglones escribibles.
+PANEL_TOP    EQU 16
+PANEL_BOTTOM EQU 175
+PANEL_LEFT   EQU 4
+PANEL_RIGHT  EQU 315
+
 .data
 titleLine   db '  BLOC DE NOTAS VGA', 0
 borderLine  db '----------------------------------------', 0
@@ -31,6 +39,16 @@ hintLine    db 'TAB+H ayuda TAB+M/N color TAB+S guarda', 0
 statusLine  db 'Bloc de notas: EDITANDO', 0
 emptyLine   db EDIT_COLS dup (' '), 0
 activeName  db 'DOCUMENT.EDT', 0  ; nombre activo, actualizado por el navegador
+txtFileName db 'DOCUMENT.TXT', 0
+htmlFileName db 'DOCUMENT.HTM', 0   ; DOS 8.3: la extension es de 3 letras
+saveEdtPath  db 'D:\DOCUMENT.EDT', 0
+saveTxtPath  db 'D:\DOCUMENT.TXT', 0
+saveHtmlPath db 'D:\DOCUMENT.HTM', 0
+baseName    db 8 dup (0)          ; nombre sin extension, compartido por los 3
+baseLen     db 0
+namePrompt  db 'Nombre base (max 8 letras) y ENTER:', 0
+savedMsg    db 'GUARDADO EN D: (TXT HTM EDT):', 0
+nameInput   db 8, 0, 8 dup (0)
 dirtyText   db '*', 0
 cleanText   db ' ', 0
 labelFila   db 'F:', 0
@@ -41,8 +59,8 @@ help1       db 'BLOC DE NOTAS VGA', 0
 help2       db 'TAB+C centro TAB+U/D arriba/abajo', 0
 help3       db 'TAB+M letra TAB+N fondo', 0
 help4       db 'TAB+I/J imagen 1/2', 0
-help5       db 'TAB+B busca TAB+S guarda', 0
-help6       db 'Flechas y Backspace editan.', 0
+help5       db 'TAB+B busca O abre archivos', 0
+help6       db 'Flechas Backspace editan. TAB+R vuelve.', 0
 help7       db 'Presione una tecla para volver.', 0
 findLabel   db 'Buscar: ', 0
 replaceLabel db 'Reemplazar con: ', 0
@@ -63,11 +81,30 @@ findInput   db 15, 0, 15 dup (0) ; formato de entrada DOS AH=0Ah
 replaceInput db 15, 0, 15 dup (0)
 findLen     db 0
 replaceLen  db 0
+lineBuffer  db 42 dup (0)         ; 40 caracteres + CR/LF para exportar TXT
+edtHeader   db 0, 0, 0, 0         ; fondo, color actual, ancho, alto
+; El HTML se arma en memoria: el fondo y el color de cada letra salen de la
+; paleta VGA real, no de un color fijo.
+htmlHead1   db '<html><body style="margin:0;background:#'
+htmlHead1End LABEL BYTE
+htmlHead2   db '"><pre style="font:16px monospace;line-height:1.1;padding:16px">',13,10
+htmlHead2End LABEL BYTE
+spanOpen1   db '<span style="color:#'
+spanOpen1End LABEL BYTE
+spanOpen2   db '">'
+spanOpen2End LABEL BYTE
+spanClose   db '</span>'
+spanCloseEnd LABEL BYTE
+htmlFoot    db '</pre></body></html>',13,10
+htmlFootEnd LABEL BYTE
+spanAbierto db 0
+spanColor   db 0
+htmlLine    db 1700 dup (0)       ; una fila de HTML ya con sus etiquetas
 searchLimit dw 0
 dirtyFlag   db 0
 commandMode db 0                  ; 1 despues de TAB: la siguiente letra es comando
 dtaBuffer   db 128 dup (0)
-filePattern db '*.EDT', 0
+filePattern db 'D:\*.EDT', 0      ; se guarda y se busca en la raiz de D:
 fileList    db MAX_FILES * 13 dup (0)
 fileCount   db 0
 fileIndex   db 0
@@ -75,6 +112,12 @@ browserTitle db 'NAVEGADOR .EDT', 0
 browserHint db 'Flechas Enter abre ESC sale', 0
 noFilesText db 'No hay archivos .EDT en esta carpeta.', 0
 selectMark  db '>', 0
+fontSeg     dw 0                  ; segmento de la tabla de fuente 8x8 de la BIOS
+fontOff     dw 0                  ; offset de la tabla de fuente 8x8 de la BIOS
+glyphBuf    db 8 dup (0)          ; copia local de los 8 bytes del glifo actual
+maskFondo   db 0FFh               ; que pixeles de la celda caen dentro del panel
+filaDentro  db 0
+yGlifo      dw 0                  ; linea de pixeles que se esta dibujando
 
 .code
 main PROC
@@ -86,14 +129,11 @@ main PROC
     int 21h
 main ENDP
 
-; Tema tomado de la rama Menu: borde azul oscuro y panel morado en modo 13h.
-TemaMenuVGA PROC NEAR
-    push bx                         ; conservar el color solicitado en BL
+; Carga los tres colores propios sin tocar la pantalla. Se usa por separado
+; para poder restaurar un documento guardado sin borrar lo que se dibujo.
+ConfigurarPaletaVGA PROC NEAR
     push ax
-    push cx
     push dx
-    push di
-    push es
     mov dx, 03C8h
     xor al, al
     out dx, al
@@ -114,6 +154,30 @@ TemaMenuVGA PROC NEAR
     out dx, al
     mov al, 28
     out dx, al
+    mov dx, 03C8h
+    mov al, 28
+    out dx, al
+    mov dx, 03C9h                 ; paleta 28: rosa, tercer fondo TAB+N
+    mov al, 48
+    out dx, al
+    mov al, 10
+    out dx, al
+    mov al, 42
+    out dx, al
+    pop dx
+    pop ax
+    ret
+ConfigurarPaletaVGA ENDP
+
+; Tema tomado de la rama Menu: borde azul oscuro y panel morado en modo 13h.
+TemaMenuVGA PROC NEAR
+    push bx                         ; conservar el color solicitado en BL
+    push ax
+    push cx
+    push dx
+    push di
+    push es
+    call ConfigurarPaletaVGA
     mov ax, 0A000h
     mov es, ax
     xor di, di
@@ -121,15 +185,15 @@ TemaMenuVGA PROC NEAR
     mov cx, 64000
     cld
     rep stosb
-    mov di, 14*320+4
-    mov cx, 182
+    mov di, PANEL_TOP*320+PANEL_LEFT
+    mov cx, PANEL_BOTTOM-PANEL_TOP+1
 RellenarPanelMenu:
     push cx
-    mov cx, 312
-    mov al, 1
+    mov cx, PANEL_RIGHT-PANEL_LEFT+1
+    mov al, currentBackColor      ; TAB+N cambia el panel completo
     rep stosb
     pop cx
-    add di, 8
+    add di, 320-(PANEL_RIGHT-PANEL_LEFT+1)
     loop RellenarPanelMenu
     pop es
     pop di
@@ -144,6 +208,7 @@ TemaMenuVGA ENDP
 PantallaEdicion PROC NEAR
     mov ax, 0013h                 ; VGA: 320x200, 256 colores
     int 10h
+    call ObtenerFuente
 
     call DibujarEditor
     mov cursorRow, EDIT_TOP
@@ -172,8 +237,12 @@ TabNoS:
     jmp AbrirAyuda
 TabNoH:
     cmp al, 'm'
-    jne TabNoM
+    jne TabNoO
     jmp CambiarTexto
+TabNoO:
+    cmp al, 'o'
+    jne TabNoM
+    jmp AbrirNavegador
 TabNoM:
     cmp al, 'n'
     jne TabNoN
@@ -200,8 +269,14 @@ TabNoC:
     jmp IrArriba
 TabNoU:
     cmp al, 'd'
-    jne TeclaNormal
+    jne TabNoD
     jmp IrAbajo
+TabNoD:
+    cmp al, 'r'
+    jne ComandoTabInvalido        ; TAB+otra tecla no debe escribir texto
+    jmp SalirSinGuardar
+ComandoTabInvalido:
+    jmp LeerTecla
 TeclaNormal:
     cmp al, 27                    ; ESC
     jne NoSalirSinGuardar
@@ -214,7 +289,9 @@ NoBorrarAnterior:
     cmp al, 0
     je  TeclaExtendida
     call EsCaracterPermitido
-    jc  LeerTecla
+    jnc CaracterValido
+    jmp LeerTecla                 ; TASM: salto lejano, no condicional corto
+CaracterValido:
     call EscribirCaracter
     jmp LeerTecla
 
@@ -273,12 +350,19 @@ MoverDerecha:
 
 CentrarCursor:
     mov cursorCol, EDIT_COLS/2
+    call DibujarEditor
+    call DibujarCursorVGA
     jmp LeerTecla
 IrArriba:
     mov cursorRow, EDIT_TOP
+    call DibujarEditor
+    call DibujarCursorVGA
     jmp LeerTecla
 IrAbajo:
     mov cursorRow, EDIT_BOTTOM
+    mov cursorCol, 0
+    call DibujarEditor
+    call DibujarCursorVGA
     jmp LeerTecla
 
 CambiarTexto:
@@ -307,13 +391,11 @@ AplicarFondo:
     jmp LeerTecla
 
 InsertarImagen1:
-    mov si, OFFSET img1
-    call InsertarImagen
+    call DibujarNyanVGA
     mov dirtyFlag, 1
     jmp LeerTecla
 InsertarImagen2:
-    mov si, OFFSET img2
-    call InsertarImagen
+    call DibujarTotemVGA
     mov dirtyFlag, 1
     jmp LeerTecla
 
@@ -324,6 +406,15 @@ BuscarYReemplazar:
 
 AbrirAyuda:
     call MostrarAyuda
+    jmp LeerTecla
+
+AbrirNavegador:
+    call NavegadorArchivos
+    jnc VolverDelNavegador        ; si cargo un .EDT ya dejo la pantalla lista
+    mov ax, 0013h
+    int 10h
+    call DibujarEditor
+VolverDelNavegador:
     jmp LeerTecla
 
 ; Retrocede una posicion, la limpia y conserva el cursor en ella.
@@ -345,16 +436,605 @@ PintarEspacio:
     mov textBuffer[di], ' '
     mov al, currentAttr
     mov attrBuffer[di], al
-    call LimpiarCeldaVGA
+    mov dh, cursorRow
+    mov dl, cursorCol
+    mov bl, currentAttr
+    mov al, ' '
+    call DibujarGlifoFondo
     jmp LeerTecla
 
 GuardarSalir:
-    mov al, 1                     ; el llamador debe guardar los buffers
-    ret
+    call PedirNombreGuardar
+    jc CancelarGuardar
+    call GuardarArchivos
+    mov dirtyFlag, 0
+    call MostrarGuardado
+    call DibujarEditor
+    jmp LeerTecla
+CancelarGuardar:
+    jmp LeerTecla
 SalirSinGuardar:
     xor al, al
     ret
 PantallaEdicion ENDP
+
+; Pide un nombre base y construye los nombres .EDT, .TXT y .HTML.
+PedirNombreGuardar PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+    push ds
+    pop es
+    mov ax, 0013h
+    int 10h
+    call TemaMenuVGA
+    mov dh, 10
+    mov dl, 2
+    mov si, OFFSET namePrompt
+    mov bl, 255
+    call ImprimirCadena
+    mov byte ptr nameInput+1, 0
+LeerNombreVGA:
+    mov ah, 00h
+    int 16h
+    cmp al, 27
+    jne NombreNoEsc
+    jmp CancelarNombreVGA
+NombreNoEsc:
+    cmp al, 13
+    jne NombreNoEnter
+    jmp NombreListoVGA
+NombreNoEnter:
+    cmp al, 8
+    jne NombreNoBackspace
+    jmp BorrarNombreVGA
+NombreNoBackspace:
+    call EsCaracterPermitido
+    jnc NombrePermitido
+    jmp LeerNombreVGA
+NombrePermitido:
+    cmp nameInput+1, 8
+    jb NombreHayEspacio
+    jmp LeerNombreVGA
+NombreHayEspacio:
+    xor bx, bx
+    mov bl, nameInput+1
+    mov nameInput[bx+2], al
+    mov dh, 12
+    mov dl, 2
+    add dl, nameInput+1
+    mov bl, 255
+    call DibujarGlifoFondo
+    inc nameInput+1
+    jmp LeerNombreVGA
+BorrarNombreVGA:
+    cmp nameInput+1, 0
+    jne PuedeBorrarNombre
+    jmp LeerNombreVGA
+PuedeBorrarNombre:
+    dec nameInput+1
+    ; El color va en SI ANTES de calcular la X: PintarRectVGA recibe la X en AX.
+    xor ax, ax
+    mov al, currentBackColor
+    mov si, ax
+    xor ax, ax
+    mov al, nameInput+1
+    add al, 2
+    shl ax, 1
+    shl ax, 1
+    shl ax, 1
+    mov bx, 12*8
+    mov cx, 8
+    mov dx, 8
+    call PintarRectVGA
+    jmp LeerNombreVGA
+NombreListoVGA:
+    cmp nameInput+1, 0
+    je  NombrePorDefecto
+    xor cx, cx
+    mov cl, nameInput+1
+    mov baseLen, cl
+    mov si, OFFSET nameInput+2
+    mov di, OFFSET baseName
+    rep movsb
+    call ConstruirRutas
+NombrePorDefecto:
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    clc
+    ret
+CancelarNombreVGA:
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    stc
+    ret
+PedirNombreGuardar ENDP
+
+; Arma activeName/txtFileName/htmlFileName y las tres rutas D:\ a partir de
+; baseName/baseLen. La usan tanto el guardado como el navegador de archivos.
+ConstruirRutas PROC NEAR
+    push ax
+    push cx
+    push si
+    push di
+    push es
+    push ds
+    pop es
+    cmp baseLen, 0
+    jne HayBase
+    jmp FinConstruirRutas
+HayBase:
+    mov di, OFFSET activeName
+    call CopiarBase
+    mov al, '.'
+    stosb
+    mov al, 'E'
+    stosb
+    mov al, 'D'
+    stosb
+    mov al, 'T'
+    stosb
+    xor al, al
+    stosb
+
+    mov di, OFFSET txtFileName
+    call CopiarBase
+    mov al, '.'
+    stosb
+    mov al, 'T'
+    stosb
+    mov al, 'X'
+    stosb
+    mov al, 'T'
+    stosb
+    xor al, al
+    stosb
+
+    mov di, OFFSET htmlFileName
+    call CopiarBase
+    mov al, '.'
+    stosb
+    mov al, 'H'
+    stosb
+    mov al, 'T'
+    stosb
+    mov al, 'M'
+    stosb
+    xor al, al
+    stosb
+
+    mov si, OFFSET activeName     ; los tres nombres caben justo tras "D:\"
+    mov di, OFFSET saveEdtPath+3
+    mov cx, 13
+    rep movsb
+    mov si, OFFSET txtFileName
+    mov di, OFFSET saveTxtPath+3
+    mov cx, 13
+    rep movsb
+    mov si, OFFSET htmlFileName
+    mov di, OFFSET saveHtmlPath+3
+    mov cx, 13
+    rep movsb
+FinConstruirRutas:
+    pop es
+    pop di
+    pop si
+    pop cx
+    pop ax
+    ret
+ConstruirRutas ENDP
+
+; Copia baseLen caracteres de baseName hacia ES:DI y deja DI al final.
+CopiarBase PROC NEAR
+    push cx
+    push si
+    xor cx, cx
+    mov cl, baseLen
+    mov si, OFFSET baseName
+    rep movsb
+    pop si
+    pop cx
+    ret
+CopiarBase ENDP
+
+; Confirma en pantalla que el documento quedo escrito y espera una tecla.
+MostrarGuardado PROC NEAR
+    push ax
+    push bx
+    push dx
+    push si
+    mov dh, 16
+    mov dl, 2
+    mov si, OFFSET savedMsg
+    mov bl, 255
+    call ImprimirCadena
+    mov dh, 18
+    mov dl, 2
+    mov si, OFFSET activeName
+    mov bl, 255
+    call ImprimirCadena
+    mov ah, 00h
+    int 16h
+    pop si
+    pop dx
+    pop bx
+    pop ax
+    ret
+MostrarGuardado ENDP
+
+; Guarda una copia legible .TXT y una copia .EDT con colores/fondo.
+GuardarArchivos PROC NEAR
+    call GuardarTXT
+    call GuardarEDT
+    call GuardarHTML
+    ret
+GuardarArchivos ENDP
+
+GuardarTXT PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov dx, OFFSET saveTxtPath
+    xor cx, cx
+    mov ah, 3Ch
+    int 21h
+    jc  FinGuardarTXT
+    mov bx, ax
+    mov si, OFFSET textBuffer
+    mov cx, 19
+FilaTXT:
+    push cx
+    mov di, OFFSET lineBuffer
+    mov cx, 40
+    rep movsb
+    mov al, 13
+    stosb
+    mov al, 10
+    stosb
+    mov dx, OFFSET lineBuffer
+    mov cx, 42
+    mov ah, 40h
+    int 21h
+    pop cx
+    loop FilaTXT
+    mov ah, 3Eh
+    int 21h
+FinGuardarTXT:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+GuardarTXT ENDP
+
+; Exporta el documento conservando el fondo elegido y el color de cada letra.
+; Los colores salen de la paleta VGA real, asi que el HTML se ve igual que el
+; editor aunque el usuario cambie el tema con TAB+M / TAB+N.
+GuardarHTML PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push es
+    push ds
+    pop es                        ; ES=DS: las lineas se arman con movsb
+    mov dx, OFFSET saveHtmlPath
+    xor cx, cx
+    mov ah, 3Ch
+    int 21h
+    jnc HtmlAbierto
+    jmp FinGuardarHTML
+HtmlAbierto:
+    mov bx, ax                    ; BX = handle durante toda la rutina
+
+    mov di, OFFSET htmlLine
+    mov si, OFFSET htmlHead1
+    mov cx, htmlHead1End-htmlHead1
+    rep movsb
+    mov al, currentBackColor
+    call ColorAHexVGA
+    mov si, OFFSET htmlHead2
+    mov cx, htmlHead2End-htmlHead2
+    rep movsb
+    call EscribirLineaHTML
+
+    mov si, OFFSET textBuffer
+    mov bp, OFFSET attrBuffer
+    mov cx, 19
+FilaHTML:
+    push cx
+    mov di, OFFSET htmlLine
+    mov spanAbierto, 0
+    mov cx, EDIT_COLS
+ColumnaHTML:
+    push cx
+    mov al, ds:[bp]               ; color guardado de este caracter
+    cmp spanAbierto, 0
+    je  AbrirSpanFila
+    cmp al, spanColor
+    je  SoloCaracterHTML
+    call CerrarSpanHTML
+AbrirSpanFila:
+    mov spanColor, al
+    call AbrirSpanColorHTML
+SoloCaracterHTML:
+    mov al, [si]
+    mov [di], al
+    inc di
+    inc si
+    inc bp
+    pop cx
+    loop ColumnaHTML
+    cmp spanAbierto, 0
+    je  SinSpanAbierto
+    call CerrarSpanHTML
+SinSpanAbierto:
+    mov al, 13
+    mov [di], al
+    inc di
+    mov al, 10
+    mov [di], al
+    inc di
+    call EscribirLineaHTML
+    pop cx
+    loop FilaHTML
+
+    mov di, OFFSET htmlLine
+    mov si, OFFSET htmlFoot
+    mov cx, htmlFootEnd-htmlFoot
+    rep movsb
+    call EscribirLineaHTML
+    mov ah, 3Eh
+    int 21h
+FinGuardarHTML:
+    pop es
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+GuardarHTML ENDP
+
+; Vuelca en el handle BX lo que haya entre htmlLine y DI.
+EscribirLineaHTML PROC NEAR
+    push ax
+    push cx
+    push dx
+    mov cx, di
+    sub cx, OFFSET htmlLine
+    mov dx, OFFSET htmlLine
+    mov ah, 40h
+    int 21h
+    pop dx
+    pop cx
+    pop ax
+    ret
+EscribirLineaHTML ENDP
+
+; Abre <span style="color:#RRGGBB"> en DS:DI usando spanColor.
+AbrirSpanColorHTML PROC NEAR
+    push ax
+    push cx
+    push si
+    mov si, OFFSET spanOpen1
+    mov cx, spanOpen1End-spanOpen1
+    rep movsb
+    mov al, spanColor
+    call ColorAHexVGA
+    mov si, OFFSET spanOpen2
+    mov cx, spanOpen2End-spanOpen2
+    rep movsb
+    mov spanAbierto, 1
+    pop si
+    pop cx
+    pop ax
+    ret
+AbrirSpanColorHTML ENDP
+
+CerrarSpanHTML PROC NEAR
+    push ax
+    push cx
+    push si
+    mov si, OFFSET spanClose
+    mov cx, spanCloseEnd-spanClose
+    rep movsb
+    mov spanAbierto, 0
+    pop si
+    pop cx
+    pop ax
+    ret
+CerrarSpanHTML ENDP
+
+; AL = indice de paleta. Escribe sus 6 digitos hex (RRGGBB) en DS:DI.
+; Lee el DAC de la VGA, asi que sirve para cualquiera de los 256 colores.
+ColorAHexVGA PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    mov dx, 03C7h
+    out dx, al                    ; indice a leer del DAC
+    mov dx, 03C9h
+    mov cx, 3                     ; R, G y B
+ComponenteHexVGA:
+    in  al, dx
+    shl al, 1                     ; el DAC guarda 6 bits: escalar a 0..255
+    shl al, 1
+    call ByteAHexVGA
+    loop ComponenteHexVGA
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+ColorAHexVGA ENDP
+
+; AL = byte. Escribe sus dos digitos hex en DS:DI y avanza DI.
+ByteAHexVGA PROC NEAR
+    push ax
+    push bx
+    mov bl, al
+    shr al, 1                     ; 8086: no existe shr al, 4
+    shr al, 1
+    shr al, 1
+    shr al, 1
+    call DigitoHexVGA
+    mov al, bl
+    and al, 0Fh
+    call DigitoHexVGA
+    pop bx
+    pop ax
+    ret
+ByteAHexVGA ENDP
+
+; AL = 0..15. Escribe un digito hex en DS:DI y avanza DI.
+DigitoHexVGA PROC NEAR
+    push ax
+    cmp al, 10
+    jb  DigitoNumeroVGA
+    add al, 'A'-10
+    jmp EscribirDigitoVGA
+DigitoNumeroVGA:
+    add al, '0'
+EscribirDigitoVGA:
+    mov [di], al
+    inc di
+    pop ax
+    ret
+DigitoHexVGA ENDP
+
+GuardarEDT PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    mov al, currentBackColor
+    mov edtHeader, al
+    mov al, currentAttr
+    mov edtHeader+1, al
+    mov byte ptr edtHeader+2, EDIT_COLS
+    mov byte ptr edtHeader+3, 19
+    mov dx, OFFSET saveEdtPath
+    xor cx, cx
+    mov ah, 3Ch
+    int 21h
+    jc  FinGuardarEDT
+    mov bx, ax
+    mov dx, OFFSET edtHeader
+    mov cx, 4
+    mov ah, 40h
+    int 21h
+    mov dx, OFFSET textBuffer
+    mov cx, BUFFER_SIZE
+    mov ah, 40h
+    int 21h
+    mov dx, OFFSET attrBuffer
+    mov cx, BUFFER_SIZE
+    mov ah, 40h
+    int 21h
+    ; Copia exacta de la pantalla VGA: conserva fondo, letras e imagenes.
+    push ds
+    mov ax, 0A000h
+    mov ds, ax
+    xor dx, dx
+    mov cx, 64000
+    mov ah, 40h
+    int 21h
+    pop ds
+    mov ah, 3Eh
+    int 21h
+FinGuardarEDT:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+GuardarEDT ENDP
+
+; Lee saveEdtPath y restaura fondo, color activo, texto, color por caracter y
+; la pantalla completa (con las imagenes). CF=1 si el archivo no se pudo abrir.
+CargarEDT PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    mov dx, OFFSET saveEdtPath
+    mov ax, 3D00h
+    int 21h
+    jnc EdtAbierto
+    jmp FalloCargarEDT
+EdtAbierto:
+    mov bx, ax
+    mov dx, OFFSET edtHeader      ; fondo, color activo, ancho y alto
+    mov cx, 4
+    mov ah, 3Fh
+    int 21h
+    mov al, edtHeader
+    mov currentBackColor, al
+    mov al, edtHeader+1
+    mov currentAttr, al
+    mov dx, OFFSET textBuffer
+    mov cx, BUFFER_SIZE
+    mov ah, 3Fh
+    int 21h
+    mov dx, OFFSET attrBuffer
+    mov cx, BUFFER_SIZE
+    mov ah, 3Fh
+    int 21h
+    push bx                       ; el cambio de modo no debe perder el handle
+    mov ax, 0013h
+    int 10h
+    call ConfigurarPaletaVGA
+    pop bx
+    push ds                       ; la copia de pantalla se lee directo a A000h
+    mov ax, 0A000h
+    mov ds, ax
+    xor dx, dx
+    mov cx, 64000
+    mov ah, 3Fh
+    int 21h
+    pop ds
+    mov ah, 3Eh
+    int 21h
+    mov cursorRow, EDIT_TOP
+    mov cursorCol, 0
+    mov dirtyFlag, 0
+    clc
+    jmp FinCargarEDT
+FalloCargarEDT:
+    stc
+FinCargarEDT:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+CargarEDT ENDP
 
 ; Reinicia el contenido y sus atributos antes de entrar al editor.
 LimpiarBuffer PROC NEAR
@@ -428,10 +1108,10 @@ ActualizarEstado PROC NEAR
     push bx
     push dx
     push si
-    mov dh, 24
+    mov dh, 24                    ; limpiar la barra antes de repintar los campos
     mov dl, 0
     mov si, OFFSET emptyLine
-    mov bl, 17h
+    mov bl, 0
     call ImprimirCadena
     mov dh, 24
     mov dl, 0
@@ -506,13 +1186,13 @@ ImprimirNumero2 PROC NEAR
     push ax
     add al, '0'
     mov bl, 255
-    call DibujarGlifoVGA
+    call DibujarGlifoFondo
     pop ax
     inc dl
     mov al, ah
     add al, '0'
     mov bl, 255
-    call DibujarGlifoVGA
+    call DibujarGlifoFondo
     pop dx
     pop cx
     pop bx
@@ -527,6 +1207,16 @@ NavegadorArchivos PROC NEAR
     mov ax, 0013h
     int 10h
     call TemaMenuVGA
+    mov dh, 2
+    mov dl, 12
+    mov si, OFFSET browserTitle
+    mov bl, 255
+    call ImprimirCadena
+    mov dh, 22
+    mov dl, 7
+    mov si, OFFSET browserHint
+    mov bl, 10
+    call ImprimirCadena
     cmp fileCount, 0
     jne MostrarLista
     mov dh, 10
@@ -570,8 +1260,7 @@ ArchivoAbajo:
     jmp RedibujarLista
 ElegirArchivo:
     call CopiarArchivoActivo
-    mov dirtyFlag, 0
-    clc
+    call CargarEDT                ; CF sale de aqui: 0 si el documento se cargo
     ret
 CancelarArchivo:
     stc
@@ -686,28 +1375,36 @@ ImprimirArchivo:
     ret
 DibujarNavegador ENDP
 
+; Toma el nombre elegido en la lista, se queda con la parte previa al punto y
+; deja listas las rutas .EDT, .TXT y .HTM para cargar y para el proximo guardado.
 CopiarArchivoActivo PROC NEAR
     push ax
     push bx
-    push cx
-    push di
     push si
-    push es
-    push ds
-    pop es
     xor ax, ax
     mov al, fileIndex
     mov bl, 13
     mul bl
     mov si, ax
     add si, OFFSET fileList
-    mov di, OFFSET activeName
-    mov cx, 13
-    rep movsb
-    pop es
+    mov baseLen, 0
+    xor bx, bx
+CopiarBaseArchivo:
+    mov al, [si]
+    cmp al, '.'
+    je  FinBaseArchivo
+    or  al, al
+    je  FinBaseArchivo
+    cmp bl, 8
+    jae FinBaseArchivo
+    mov baseName[bx], al
+    inc bx
+    inc si
+    jmp CopiarBaseArchivo
+FinBaseArchivo:
+    mov baseLen, bl
+    call ConstruirRutas
     pop si
-    pop di
-    pop cx
     pop bx
     pop ax
     ret
@@ -730,10 +1427,13 @@ PintarBuffer PROC NEAR
     mov cx, BUFFER_SIZE
 PintarCelda:
     mov al, textBuffer[di]
+    cmp al, ' '
+    je  CeldaVacia
     mov bl, attrBuffer[di]
     mov dh, cursorRow
     mov dl, cursorCol
-    call DibujarGlifoVGA
+    call DibujarGlifoFondo
+CeldaVacia:
     inc di
     inc cursorCol
     cmp cursorCol, EDIT_COLS
@@ -753,6 +1453,218 @@ SiguienteCelda:
     pop ax
     ret
 PintarBuffer ENDP
+
+; TAB+I: Nyan Cat de 50x48 aproximadamente, dibujado directamente en A000h.
+; No usa el cursor de texto ni BIOS, asi que no bloquea la pantalla VGA.
+DibujarNyanVGA PROC NEAR
+    ; arcoiris
+    mov ax, 96
+    mov bx, 92
+    mov cx, 38
+    mov dx, 3
+    mov si, 12
+    call PintarRectVGA
+    mov bx, 95
+    mov si, 14
+    call PintarRectVGA
+    mov bx, 98
+    mov si, 10
+    call PintarRectVGA
+    mov bx, 101
+    mov si, 11
+    call PintarRectVGA
+    ; cuerpo de galleta rosa (borde y relleno)
+    mov ax, 132
+    mov bx, 82
+    mov cx, 28
+    mov dx, 22
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 134
+    mov bx, 84
+    mov cx, 24
+    mov dx, 18
+    mov si, 13
+    call PintarRectVGA
+    mov ax, 137
+    mov bx, 87
+    mov cx, 3
+    mov dx, 3
+    mov si, 15
+    call PintarRectVGA
+    mov ax, 149
+    mov bx, 95
+    mov cx, 3
+    mov dx, 3
+    mov si, 15
+    call PintarRectVGA
+    ; cara del gato y orejas
+    mov ax, 158
+    mov bx, 78
+    mov cx, 17
+    mov dx, 4
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 160
+    mov bx, 76
+    mov cx, 4
+    mov dx, 4
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 187
+    mov bx, 76
+    mov cx, 4
+    mov dx, 4
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 158
+    mov bx, 81
+    mov cx, 24
+    mov dx, 21
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 160
+    mov bx, 82
+    mov cx, 20
+    mov dx, 18
+    mov si, 7
+    call PintarRectVGA
+    mov ax, 164
+    mov bx, 87
+    mov cx, 3
+    mov dx, 3
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 176
+    mov bx, 87
+    mov cx, 3
+    mov dx, 3
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 170
+    mov bx, 95
+    mov cx, 4
+    mov dx, 2
+    mov si, 0
+    call PintarRectVGA
+    ret
+DibujarNyanVGA ENDP
+
+; TAB+J: totem pixel-art de 50x48, segundo sprite independiente.
+DibujarTotemVGA PROC NEAR
+    mov ax, 134
+    mov bx, 74
+    mov cx, 50
+    mov dx, 48
+    mov si, 6
+    call PintarRectVGA
+    mov ax, 137
+    mov bx, 77
+    mov cx, 44
+    mov dx, 42
+    mov si, 4
+    call PintarRectVGA
+    ; franjas y mascara
+    mov ax, 137
+    mov bx, 85
+    mov cx, 44
+    mov dx, 4
+    mov si, 14
+    call PintarRectVGA
+    mov ax, 137
+    mov bx, 101
+    mov cx, 44
+    mov dx, 4
+    mov si, 12
+    call PintarRectVGA
+    mov ax, 145
+    mov bx, 87
+    mov cx, 28
+    mov dx, 13
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 148
+    mov bx, 89
+    mov cx, 9
+    mov dx, 6
+    mov si, 15
+    call PintarRectVGA
+    mov ax, 166
+    mov bx, 89
+    mov cx, 9
+    mov dx, 6
+    mov si, 15
+    call PintarRectVGA
+    mov ax, 151
+    mov bx, 91
+    mov cx, 3
+    mov dx, 3
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 170
+    mov bx, 91
+    mov cx, 3
+    mov dx, 3
+    mov si, 0
+    call PintarRectVGA
+    mov ax, 160
+    mov bx, 96
+    mov cx, 12
+    mov dx, 2
+    mov si, 12
+    call PintarRectVGA
+    mov ax, 151
+    mov bx, 108
+    mov cx, 12
+    mov dx, 5
+    mov si, 10
+    call PintarRectVGA
+    mov ax, 164
+    mov bx, 108
+    mov cx, 12
+    mov dx, 5
+    mov si, 10
+    call PintarRectVGA
+    ret
+DibujarTotemVGA ENDP
+
+; AX=X, BX=Y, CX=ancho, DX=alto, SI=color.  Rectangulo solido en 320x200.
+PintarRectVGA PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    push es
+    push bp
+    mov bp, dx
+    mov di, ax
+    mov ax, bx
+    mov bx, 320
+    mul bx
+    add ax, di
+    mov di, ax
+    mov ax, 0A000h
+    mov es, ax
+RectFilaVGA:
+    push cx
+    mov ax, si
+    rep stosb
+    pop cx
+    mov ax, 320
+    sub ax, cx
+    add di, ax
+    dec bp
+    jnz RectFilaVGA
+    pop bp
+    pop es
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+PintarRectVGA ENDP
 
 ; Inserta en el cursor una imagen de 3x5 recibida en DS:SI.
 InsertarImagen PROC NEAR
@@ -778,10 +1690,13 @@ ColumnaImagen:
     mov al, [si]
     mov textBuffer[di], al
     mov attrBuffer[di], 255
+    cmp al, ' '
+    je  PixelImagenVacio
     mov dh, cursorRow
     mov dl, cursorCol
     mov bl, 255
-    call DibujarGlifoVGA
+    call DibujarGlifoFondo
+PixelImagenVacio:
     inc si
     inc cursorCol
     dec bx
@@ -1013,7 +1928,7 @@ EscribirCaracter PROC NEAR
     mov dh, cursorRow
     mov dl, cursorCol
     mov bl, currentAttr
-    call DibujarGlifoVGA
+    call DibujarGlifoFondo
     pop dx
     pop cx
     pop bx
@@ -1039,6 +1954,45 @@ FinEscritura:
     ret
 EscribirCaracter ENDP
 
+; Muestra un marco fino en la celda activa para que TAB+U/D/C sea visible.
+DibujarCursorVGA PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    xor ax, ax
+    mov al, cursorCol
+    shl ax, 1
+    shl ax, 1
+    shl ax, 1
+    xor bx, bx
+    mov bl, cursorRow
+    shl bx, 1
+    shl bx, 1
+    shl bx, 1
+    mov cx, 8
+    mov dx, 1
+    mov si, 255
+    call PintarRectVGA
+    add bx, 7
+    call PintarRectVGA
+    sub bx, 7
+    mov cx, 1
+    mov dx, 6
+    inc ax
+    inc bx
+    call PintarRectVGA
+    add ax, 6
+    call PintarRectVGA
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+DibujarCursorVGA ENDP
+
 ColocarCursor PROC NEAR
     ; En modo 13h no existe cursor de texto de hardware.
     ; El proximo caracter se dibuja en cursorRow/cursorCol.
@@ -1047,6 +2001,9 @@ ColocarCursor ENDP
 
 ; En modo 13h las entradas DOS se muestran en el punto que dibuja la interfaz.
 ColocarCursorDirecto PROC NEAR
+    mov ah, 02h
+    mov bh, 0
+    int 10h
     ret
 ColocarCursorDirecto ENDP
 
@@ -1065,7 +2022,7 @@ SiguienteLetraVGA:
     lodsb
     or  al, al
     jz  FinCadenaVGA
-    call DibujarGlifoVGA
+    call DibujarGlifoFondo        ; los espacios ya repintan el fondo correcto
     inc dl
     cmp dl, EDIT_COLS
     jb  SiguienteLetraVGA
@@ -1081,67 +2038,144 @@ FinCadenaVGA:
     ret
 ImprimirCadena ENDP
 
-; AL=ASCII, DH=fila, DL=columna, BL=color VGA (0..255).
-; BIOS dibuja el glifo de 8x8 en modo 13h; el fondo/panel si es por pixeles.
-DibujarGlifoVGA PROC NEAR
+; Obtiene el puntero ROM de la fuente 8x8 (BH=3) y lo guarda en fontSeg/fontOff.
+; Se llama una vez al entrar al editor; el puntero no cambia entre modos.
+ObtenerFuente PROC NEAR
     push ax
     push bx
-    push cx
-    push dx
-    mov ah, 02h                    ; posicion de caracteres en VGA
-    mov bh, 0
+    push es
+    push bp
+    mov ax, 1130h
+    mov bh, 3
     int 10h
-    mov ah, 09h                    ; AL con color BL, una repeticion
-    mov bh, 0
-    mov cx, 1
-    int 10h
-    pop dx
-    pop cx
+    mov fontSeg, es
+    mov fontOff, bp
+    pop bp
+    pop es
     pop bx
     pop ax
     ret
-DibujarGlifoVGA ENDP
+ObtenerFuente ENDP
 
-; Limpia el bloque 8x8 de la celda actual con el color de fondo seleccionado.
-LimpiarCeldaVGA PROC NEAR
+; AL=ASCII, DH=fila, DL=columna, BL=color de letra (0..255).
+; Dibuja el glifo pixel por pixel usando currentBackColor como fondo real,
+; a diferencia de DibujarGlifoVGA (BIOS), que siempre pinta el fondo de negro.
+DibujarGlifoFondo PROC NEAR
     push ax
     push bx
     push cx
     push dx
+    push si
     push di
     push es
-    mov bl, currentBackColor
+
+    ; --- copiar los 8 bytes del glifo a glyphBuf usando ES=fontSeg ---
+    push bx
+    xor ah, ah
+    mov cl, 8
+    mul cl                        ; ax = caracter*8
+    mov si, ax
+    add si, fontOff
+    mov bx, fontSeg
+    push es
+    mov es, bx
+    mov di, OFFSET glyphBuf
+    mov cx, 8
+CopiarGlifoFondo:
+    mov al, es:[si]
+    mov [di], al
+    inc si
+    inc di
+    loop CopiarGlifoFondo
+    pop es
+    pop bx                        ; color de letra de vuelta en BL
+
+    ; --- que pixeles de la celda caen dentro del panel horizontalmente ---
+    mov maskFondo, 0FFh
+    cmp dl, 0
+    jne NoBordeIzq
+    mov maskFondo, 0Fh            ; en la columna 0 los 4 primeros son borde
+NoBordeIzq:
+    cmp dl, EDIT_COLS-1
+    jne NoBordeDer
+    mov maskFondo, 0F0h           ; en la ultima columna los 4 ultimos son borde
+NoBordeDer:
+
+    ; --- calcular offset de pixel superior-izquierdo en DI ---
+    ; OJO: "mul bx" (multiplicacion de 16 bits) siempre escribe en DX,
+    ; asi que hay que leer DL (columna) ANTES de usarlo, o se pierde.
+    push bx
+    push bp
     xor ax, ax
-    mov al, cursorRow
-    shl ax, 1
-    shl ax, 1
-    shl ax, 1
-    mov dx, 320
-    mul dx
-    xor dx, dx
-    mov dl, cursorCol
-    shl dx, 1
-    shl dx, 1
-    shl dx, 1
-    add ax, dx
+    mov al, dl
+    mov cl, 8
+    mul cl                        ; ax = columna*8 (mul de 8 bits: no toca dx)
+    mov bp, ax                    ; guardar offset de columna
+    xor ax, ax
+    mov al, dh
+    mov cl, 8
+    mul cl                        ; ax = fila*8
+    mov yGlifo, ax                ; primera linea de pixeles de la celda
+    mov bx, 320
+    mul bx                        ; ax = (fila*8)*320 (mul de 16 bits: destruye dx aqui)
+    add ax, bp
     mov di, ax
+    pop bp
+    pop bx                        ; color de letra otra vez en BL
+
     mov ax, 0A000h
     mov es, ax
-    mov dx, 8
-FilaLimpiaVGA:
-    mov al, bl
+    mov si, OFFSET glyphBuf
+    mov dx, 8                     ; 8 filas del glifo
+FilaGlifoFondo:
+    push di
+    mov ax, yGlifo                ; esta linea cae dentro del panel?
+    cmp ax, PANEL_TOP
+    jb  FilaFueraPanel
+    cmp ax, PANEL_BOTTOM
+    ja  FilaFueraPanel
+    mov filaDentro, 1
+    jmp FilaPanelLista
+FilaFueraPanel:
+    mov filaDentro, 0
+FilaPanelLista:
+    lodsb
+    mov ah, 80h                   ; mascara de bit inicial
     mov cx, 8
-    rep stosb
-    add di, 312
+ColGlifoFondo:
+    test al, ah
+    jz  PixelDeFondo
+    mov es:[di], bl
+    jmp SigPixelFondo
+PixelDeFondo:
+    push ax
+    xor al, al                    ; por defecto, el azul oscuro del borde
+    cmp filaDentro, 0
+    je  PintarPixelFondo
+    test maskFondo, ah
+    jz  PintarPixelFondo
+    mov al, currentBackColor
+PintarPixelFondo:
+    mov es:[di], al
+    pop ax
+SigPixelFondo:
+    inc di
+    shr ah, 1
+    loop ColGlifoFondo
+    pop di
+    add di, 320
+    inc yGlifo
     dec dx
-    jnz FilaLimpiaVGA
+    jnz FilaGlifoFondo
+
     pop es
     pop di
+    pop si
     pop dx
     pop cx
     pop bx
     pop ax
     ret
-LimpiarCeldaVGA ENDP
+DibujarGlifoFondo ENDP
 
 END main
