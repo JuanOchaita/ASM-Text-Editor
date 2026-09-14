@@ -996,21 +996,21 @@ check_key:
     je check_newfile_len
     jmp mouse_loop
 check_newfile_len:
-    cmp newfiletextlen,32
+    cmp newfiletextlen,6
     jl newfile_key_store
     jmp mouse_loop
 newfile_key_store:
     mov bx,newfiletextlen
     mov [newfiletext+bx],al
 
-    push ax
+    push ax            ; char
+    mov ax,78
+    push ax            ; y (fila fija)
     mov ax,newfiletextlen
     mov cl,8
     mul cl
-    add ax,78
-    push ax
-    mov ax,139
-    push ax
+    add ax,139
+    push ax            ; x (avanza 8px por cada letra)
     call DrawChar
 
     inc newfiletextlen
