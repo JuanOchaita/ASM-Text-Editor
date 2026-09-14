@@ -3,6 +3,16 @@
 
 .DATA
 
+metadata_filename db 'metadata.txt',0
+filebuf db 4096 dup(0)
+filehandle dw 0
+bytesread dw 0
+linecount dw 0
+colcount dw 0
+rowcount dw 0
+curX dw 0
+curY dw 0
+
 clickprev db 0
 
 windowEbuf db 4576 dup(0)
@@ -423,6 +433,94 @@ rellenar_fila:
     ;push KYF
     ;push KXF
     ;call DrawSprite
+        mov ax,3D00h
+    mov dx,offset metadata_filename
+    int 21h
+    jc no_metadata
+    mov filehandle,ax
+
+    mov bx,filehandle
+    mov dx,offset filebuf
+    mov cx,4096
+    mov ah,3Fh
+    int 21h
+    mov bytesread,ax
+
+    mov bx,filehandle
+    mov ah,3Eh
+    int 21h
+
+    mov cx,bytesread
+    cmp cx,0
+    je no_metadata
+
+    mov si,offset filebuf
+    xor dx,dx
+count_loop:
+    mov al,[si]
+    inc si
+    cmp al,0Ah
+    jne not_newline
+    inc dx
+not_newline:
+    loop count_loop
+
+    mov si,offset filebuf
+    add si,bytesread
+    dec si
+    mov al,[si]
+    cmp al,0Ah
+    je no_extra_line
+    inc dx
+no_extra_line:
+    mov linecount,dx
+
+no_metadata:
+
+    mov cx,linecount
+    cmp cx,0
+    je skip_draw_files
+
+    mov colcount,0
+    mov rowcount,0
+
+draw_files_loop:
+    push cx
+
+    mov ax,colcount
+    mov bx,52
+    mul bx
+    add ax,19
+    mov curX,ax
+
+    mov ax,rowcount
+    mov bx,52
+    mul bx
+    add ax,29
+    mov curY,ax
+
+    push offset file
+    push curY
+    push curX
+    push KYF
+    push KXF
+    call DrawSprite
+
+    mov ax,colcount
+    inc ax
+    cmp ax,6
+    jl no_row_increment
+    mov colcount,0
+    inc rowcount
+    jmp col_updated
+no_row_increment:
+    mov colcount,ax
+col_updated:
+
+    pop cx
+    loop draw_files_loop
+
+skip_draw_files:
 
 mouse_loop:
     mov ax,0003h
@@ -526,7 +624,7 @@ check_close_icon:
     jge closeE_check_x2
     jmp click_check_done
 closeE_check_x2:
-    cmp iposxMS,207
+    cmp iposxMS,209
     jle closeE_check_y1
     jmp click_check_done
 closeE_check_y1:
@@ -547,6 +645,7 @@ closeE_activate:
     call RestoreUnderCursor
 
     mov windowEshown,0
+    mov mousedrawn,0
 
 click_check_done:
 
