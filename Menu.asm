@@ -4,6 +4,10 @@
 
 .DATA
 
+searchpattern db '*.htm',0
+dtabuf db 43 dup(0)
+filenamesbuf db 64*13 dup(0)
+
 fontseg dw 0
 fontoff dw 0
 lineoffsets dw 64 dup(0)
@@ -470,78 +474,53 @@ rellenar_fila:
     ;push KXF
     ;call DrawSprite
     
-    mov ax,3D00h
-    mov dx,offset metadata_filename
-    int 21h
-    jnc file_opened
-    jmp no_metadata
-
-file_opened:
-    mov filehandle,ax
-
-    mov bx,filehandle
-    mov dx,offset filebuf
-    mov cx,4096
-    mov ah,3Fh
-    int 21h
-    mov bytesread,ax
-
-    mov bx,filehandle
-    mov ah,3Eh
+    ; Establecer nuestra propia DTA
+    mov dx,offset dtabuf
+    mov ah,1Ah
     int 21h
 
-    mov cx,bytesread
-    cmp cx,0
-    jne file_has_data
-    jmp no_metadata
-file_has_data:
-    mov si,offset filebuf
+    ; Buscar primer archivo .htm
+    mov dx,offset searchpattern
+    mov cx,0
+    mov ah,4Eh
+    int 21h
+    jnc found_first_file
+    jmp no_files_found
 
-    mov bx,si
-    xor dx,dx
+found_first_file:
+scan_loop:
+    cmp linecount,64
+    jl scan_continue
+    jmp scan_done
+scan_continue:
 
-parse_loop:
-    cmp cx,0
-    je parse_final_line
+    ; Copiar nombre del archivo desde DTA+30 al slot correspondiente
+    mov si,offset dtabuf+30
+    mov ax,linecount
+    mov bx,13
+    mul bx
+    mov di,ax
+    add di,offset filenamesbuf
+
+copy_filename_loop:
     mov al,[si]
+    mov [di],al
     inc si
-    dec cx
-    cmp al,0Ah
-    je parse_newline
-    inc dx
-    jmp parse_loop
+    inc di
+    cmp al,0
+    je copy_filename_done
+    jmp copy_filename_loop
+copy_filename_done:
 
-parse_newline:
-    mov ax,bx
-    sub ax,offset filebuf
-    call TrimCR
-    cmp linecount,64
-    jge parse_skip_store
-    mov di,linecount
-    shl di,1
-    mov [lineoffsets+di],ax
-    mov [linelengths+di],dx
-    inc linecount
-parse_skip_store:
-    mov bx,si
-    xor dx,dx
-    jmp parse_loop
-
-parse_final_line:
-    cmp dx,0
-    je no_metadata
-    mov ax,bx
-    sub ax,offset filebuf
-    call TrimCR
-    cmp linecount,64
-    jge no_metadata
-    mov di,linecount
-    shl di,1
-    mov [lineoffsets+di],ax
-    mov [linelengths+di],dx
     inc linecount
 
-no_metadata:
+    mov ah,4Fh
+    int 21h
+    jc scan_done
+    jmp scan_loop
+
+scan_done:
+no_files_found:
 
     mov cx,linecount
     cmp cx,0
@@ -585,11 +564,25 @@ draw_files_loop:
     mov bx,6
     mul bx
     add ax,colcount
-    mov di,ax
-    shl di,1
-    mov si,[lineoffsets+di]
-    mov cx,[linelengths+di]
-    add si,offset filebuf
+    mov bx,13
+    mul bx
+    mov si,ax
+    add si,offset filenamesbuf
+
+    push si
+    xor cx,cx
+draw_strlen_loop:
+    cmp BYTE PTR [si],0
+    je draw_strlen_done
+    cmp BYTE PTR [si],'.'
+    je draw_strlen_done
+    cmp BYTE PTR [si],'~'
+    je draw_strlen_done
+    inc si
+    inc cx
+    jmp draw_strlen_loop
+draw_strlen_done:
+    pop si
 
     mov ax,curY
     add ax,KYF
@@ -611,7 +604,10 @@ no_row_increment:
 col_updated:
 
     pop cx
-    loop draw_files_loop
+    dec cx
+    jz draw_files_done
+    jmp draw_files_loop
+draw_files_done:
 
 skip_draw_files:
 
