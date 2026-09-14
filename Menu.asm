@@ -1,12 +1,19 @@
 .MODEL SMALL
+.286
 .STACK 100h
 
 .DATA
+
+fontseg dw 0
+fontoff dw 0
+lineoffsets dw 64 dup(0)
+linelengths dw 64 dup(0)
 
 metadata_filename db 'metadata.txt',0
 filebuf db 4096 dup(0)
 filehandle dw 0
 bytesread dw 0
+lfbyte db 0Ah
 linecount dw 0
 colcount dw 0
 rowcount dw 0
@@ -370,8 +377,23 @@ main PROC
     mov ax,@data
     mov ds,ax
 
+restart_program:
+    mov linecount,0
+    mov colcount,0
+    mov rowcount,0
+    mov windowEshown,0
+    mov windowEDshown,0
+    mov mousedrawn,0
+    mov clickprev,0
+
     mov ax,0013h
     int 10h
+    
+    mov ax,1130h
+    mov bh,3
+    int 10h
+    mov fontseg,es
+    mov fontoff,bp
 
     mov ax,0000h
     int 33h
@@ -439,10 +461,14 @@ rellenar_fila:
     ;push KYF
     ;push KXF
     ;call DrawSprite
-        mov ax,3D00h
+    
+    mov ax,3D00h
     mov dx,offset metadata_filename
     int 21h
-    jc no_metadata
+    jnc file_opened
+    jmp no_metadata
+
+file_opened:
     mov filehandle,ax
 
     mov bx,filehandle
@@ -458,43 +484,74 @@ rellenar_fila:
 
     mov cx,bytesread
     cmp cx,0
-    je no_metadata
-
+    jne file_has_data
+    jmp no_metadata
+file_has_data:
     mov si,offset filebuf
+
+    mov bx,si
     xor dx,dx
-count_loop:
+
+parse_loop:
+    cmp cx,0
+    je parse_final_line
     mov al,[si]
     inc si
+    dec cx
     cmp al,0Ah
-    jne not_newline
+    je parse_newline
     inc dx
-not_newline:
-    loop count_loop
+    jmp parse_loop
 
-    mov si,offset filebuf
-    add si,bytesread
-    dec si
-    mov al,[si]
-    cmp al,0Ah
-    je no_extra_line
-    inc dx
-no_extra_line:
-    mov linecount,dx
+parse_newline:
+    mov ax,bx
+    sub ax,offset filebuf
+    call TrimCR
+    cmp linecount,64
+    jge parse_skip_store
+    mov di,linecount
+    shl di,1
+    mov [lineoffsets+di],ax
+    mov [linelengths+di],dx
+    inc linecount
+parse_skip_store:
+    mov bx,si
+    xor dx,dx
+    jmp parse_loop
+
+parse_final_line:
+    cmp dx,0
+    je no_metadata
+    mov ax,bx
+    sub ax,offset filebuf
+    call TrimCR
+    cmp linecount,64
+    jge no_metadata
+    mov di,linecount
+    shl di,1
+    mov [lineoffsets+di],ax
+    mov [linelengths+di],dx
+    inc linecount
 
 no_metadata:
 
     mov cx,linecount
     cmp cx,0
-    je skip_draw_files
+    jne has_files_1
+    jmp skip_draw_files
+has_files_1:
 
     mov colcount,0
     mov rowcount,0
 
     mov cx,linecount
     cmp cx,0
-    je skip_draw_files
+    jne has_files_2
+    jmp skip_draw_files
+has_files_2:
 
 draw_files_loop:
+
     push cx
 
     mov ax,colcount
@@ -515,6 +572,24 @@ draw_files_loop:
     push KYF
     push KXF
     call DrawSprite
+
+    mov ax,rowcount
+    mov bx,6
+    mul bx
+    add ax,colcount
+    mov di,ax
+    shl di,1
+    mov si,[lineoffsets+di]
+    mov cx,[linelengths+di]
+    add si,offset filebuf
+
+    mov ax,curY
+    add ax,KYF
+    push ax
+    push curX
+    push cx
+    push si
+    call DrawText
 
     mov ax,colcount
     inc ax
@@ -733,6 +808,17 @@ openED_activate:
     jmp click_check_done
     
 check_windowED_buttons:
+    cmp iposxMS,166
+    jl check_closeED_region
+    cmp iposxMS,212
+    jg check_closeED_region
+    cmp iposyMS,95
+    jl check_closeED_region
+    cmp iposyMS,117
+    jg check_closeED_region
+    jmp deleteED_activate
+
+check_closeED_region:
     cmp iposxMS,199
     jl fail_closeED
     cmp iposxMS,209
@@ -744,6 +830,10 @@ check_windowED_buttons:
     jmp closeED_activate
 fail_closeED:
     jmp click_check_done
+
+deleteED_activate:
+    call DeleteFileLine
+    jmp restart_program
 
 closeED_activate:
     push offset windowEDbuf
@@ -928,6 +1018,189 @@ save_pixel_loop:
     pop bp
     ret 10
 SaveUnderCursor ENDP
+
+DeleteFileLine PROC
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    mov ah,3Ch
+    xor cx,cx
+    mov dx,offset metadata_filename
+    int 21h
+    mov filehandle,ax
+
+    xor si,si
+deleteline_loop:
+    mov ax,linecount
+    cmp si,ax
+    jge deleteline_done
+
+    cmp si,fileindex
+    je deleteline_skip
+
+    mov di,si
+    shl di,1
+    mov cx,[linelengths+di]
+    cmp cx,0
+    je deleteline_writenl
+    mov dx,[lineoffsets+di]
+    add dx,offset filebuf
+    mov bx,filehandle
+    mov ah,40h
+    int 21h
+
+deleteline_writenl:
+    mov bx,filehandle
+    mov ah,40h
+    mov cx,1
+    mov dx,offset lfbyte
+    int 21h
+
+deleteline_skip:
+    inc si
+    jmp deleteline_loop
+
+deleteline_done:
+    mov bx,filehandle
+    mov ah,3Eh
+    int 21h
+
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+DeleteFileLine ENDP
+
+TrimCR PROC
+    push si
+    push cx
+    cmp dx,0
+    je trimcr_done
+    mov si,ax
+    add si,dx
+    dec si
+    add si,offset filebuf
+    mov cl,[si]
+    cmp cl,0Dh
+    jne trimcr_done
+    dec dx
+trimcr_done:
+    pop cx
+    pop si
+    ret
+TrimCR ENDP
+
+DrawChar PROC
+    push bp
+    mov bp,sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+    push ds
+
+    mov ax,0A000h
+    mov es,ax
+
+    mov ax,[bp+8]
+    xor bx,bx
+    mov bl,al
+    shl bx,3
+
+    mov dx,fontoff
+    mov ax,fontseg
+    mov ds,ax
+    mov si,dx
+    add si,bx
+
+    mov ax,[bp+6]
+    mov cx,320
+    mul cx
+    add ax,[bp+4]
+    mov di,ax
+
+    mov cx,8
+drawchar_row:
+    push cx
+    mov al,[si]
+    inc si
+    mov bl,al
+    mov cx,8
+    mov ah,80h
+drawchar_col:
+    test bl,ah
+    jz drawchar_skip
+    mov BYTE PTR es:[di],15
+drawchar_skip:
+    inc di
+    shr ah,1
+    loop drawchar_col
+    pop cx
+    add di,320-8
+    loop drawchar_row
+
+    pop ds
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret 6
+DrawChar ENDP
+
+DrawText PROC
+    push bp
+    mov bp,sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    mov si,[bp+4]
+    mov cx,[bp+6]
+    mov bx,[bp+8]
+    mov dx,[bp+10]
+
+    cmp cx,0
+    je drawtext_done
+
+drawtext_loop:
+    mov al,[si]
+    push ax
+    push dx
+    push bx
+    call DrawChar
+
+    inc si
+    add bx,8
+    dec cx
+    jnz drawtext_loop
+
+drawtext_done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret 8
+DrawText ENDP
 
 RestoreUnderCursor PROC
     push bp
