@@ -18,6 +18,12 @@ clickprev db 0
 windowEbuf db 4576 dup(0)
 windowEshown db 0
 
+windowEDbuf db 4576 dup(0)
+windowEDshown db 0
+filecol dw 0
+filerow dw 0
+fileindex dw 0
+
 ; Mouse Sprite
 MOUSESPRITED LABEL WORD
 KXMS dw 12
@@ -572,6 +578,7 @@ clamp_done:
     test bl,1
     jz no_button_down
     jmp mouse_button_down
+
 no_button_down:
     mov clickprev,0
     jmp click_check_done
@@ -580,29 +587,34 @@ mouse_button_down:
     cmp clickprev,1
     jne button_is_new
     jmp click_check_done
+
 button_is_new:
     mov clickprev,1
 
     cmp windowEshown,1
-    jne check_openE_icon
+    jne check_windowEshown_no
     jmp check_windowE_buttons
+check_windowEshown_no:
 
+    cmp windowEDshown,1
+    jne check_windowEDshown_no
+    jmp check_windowED_buttons
+check_windowEDshown_no:
+
+    jmp check_openE_icon
+    
 check_openE_icon:
     cmp iposxMS,307
-    jge openE_check_x2
-    jmp click_check_done
-openE_check_x2:
+    jl fail_openE
     cmp iposxMS,317
-    jle openE_check_y1
-    jmp click_check_done
-openE_check_y1:
+    jg fail_openE
     cmp iposyMS,3
-    jge openE_check_y2
-    jmp click_check_done
-openE_check_y2:
+    jl fail_openE
     cmp iposyMS,13
-    jle openE_activate
-    jmp click_check_done
+    jg fail_openE
+    jmp openE_activate
+fail_openE:
+    jmp check_file_icons
 
 openE_activate:
     push offset windowEbuf
@@ -624,19 +636,15 @@ openE_activate:
 
 check_windowE_buttons:
     cmp iposxMS,145
-    jge okbtn_check_x2
-    jmp check_close_icon
-okbtn_check_x2:
+    jl fail_okbtn
     cmp iposxMS,173
-    jle okbtn_check_y1
-    jmp check_close_icon
-okbtn_check_y1:
+    jg fail_okbtn
     cmp iposyMS,45
-    jge okbtn_check_y2
-    jmp check_close_icon
-okbtn_check_y2:
+    jl fail_okbtn
     cmp iposyMS,109
-    jle okbtn_activate
+    jg fail_okbtn
+    jmp okbtn_activate
+fail_okbtn:
     jmp check_close_icon
 
 okbtn_activate:
@@ -644,19 +652,15 @@ okbtn_activate:
 
 check_close_icon:
     cmp iposxMS,199
-    jge closeE_check_x2
-    jmp click_check_done
-closeE_check_x2:
+    jl fail_closeE
     cmp iposxMS,209
-    jle closeE_check_y1
-    jmp click_check_done
-closeE_check_y1:
+    jg fail_closeE
     cmp iposyMS,77
-    jge closeE_check_y2
-    jmp click_check_done
-closeE_check_y2:
+    jl fail_closeE
     cmp iposyMS,87
-    jle closeE_activate
+    jg fail_closeE
+    jmp closeE_activate
+fail_closeE:
     jmp click_check_done
 
 closeE_activate:
@@ -669,6 +673,89 @@ closeE_activate:
 
     mov windowEshown,0
     mov mousedrawn,0
+    jmp click_check_done
+
+check_file_icons:
+    mov ax,iposxMS
+    cmp ax,19
+    jl fail_file
+    sub ax,19
+    xor dx,dx
+    mov bx,52
+    div bx
+    cmp ax,6
+    jge fail_file
+    cmp dx,KXF
+    jge fail_file
+    mov filecol,ax
+
+    mov ax,iposyMS
+    cmp ax,29
+    jl fail_file
+    sub ax,29
+    xor dx,dx
+    mov bx,52
+    div bx
+    cmp dx,KYF
+    jge fail_file
+    mov filerow,ax
+
+    mov ax,filerow
+    mov bx,6
+    mul bx
+    add ax,filecol
+    mov fileindex,ax
+
+    mov ax,linecount
+    cmp fileindex,ax
+    jge fail_file
+
+    jmp openED_activate
+fail_file:
+    jmp click_check_done
+    
+openED_activate:
+    push offset windowEDbuf
+    push iposyED
+    push iposxED
+    push KYED
+    push KXED
+    call SaveUnderCursor
+
+    push offset windowED
+    push iposyED
+    push iposxED
+    push KYED
+    push KXED
+    call DrawSprite
+
+    mov windowEDshown,1
+    jmp click_check_done
+    
+check_windowED_buttons:
+    cmp iposxMS,199
+    jl fail_closeED
+    cmp iposxMS,209
+    jg fail_closeED
+    cmp iposyMS,77
+    jl fail_closeED
+    cmp iposyMS,87
+    jg fail_closeED
+    jmp closeED_activate
+fail_closeED:
+    jmp click_check_done
+
+closeED_activate:
+    push offset windowEDbuf
+    push iposyED
+    push iposxED
+    push KYED
+    push KXED
+    call RestoreUnderCursor
+
+    mov windowEDshown,0
+    mov mousedrawn,0
+    jmp click_check_done
 
 click_check_done:
 
