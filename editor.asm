@@ -48,6 +48,7 @@ baseName    db 8 dup (0)          ; nombre sin extension, compartido por los 3
 baseLen     db 0
 namePrompt  db 'Nombre base (max 8 letras) y ENTER:', 0
 savedMsg    db 'GUARDADO EN D: (TXT HTM EDT):', 0
+localSavedMsg db 'GUARDADO LOCAL (monta D: para Escritorio):', 0
 nameInput   db 8, 0, 8 dup (0)
 dirtyText   db '*', 0
 cleanText   db ' ', 0
@@ -83,6 +84,7 @@ findLen     db 0
 replaceLen  db 0
 lineBuffer  db 42 dup (0)         ; 40 caracteres + CR/LF para exportar TXT
 edtHeader   db 0, 0, 0, 0         ; fondo, color actual, ancho, alto
+saveOk      db 1
 ; El HTML se arma en memoria: el fondo y el color de cada letra salen de la
 ; paleta VGA real, no de un color fijo.
 htmlHead1   db '<html><body style="margin:0;background:#'
@@ -660,6 +662,10 @@ MostrarGuardado PROC NEAR
     mov dh, 16
     mov dl, 2
     mov si, OFFSET savedMsg
+    cmp saveOk, 0
+    jne MensajeGuardadoD
+    mov si, OFFSET localSavedMsg
+MensajeGuardadoD:
     mov bl, 255
     call ImprimirCadena
     mov dh, 18
@@ -678,6 +684,7 @@ MostrarGuardado ENDP
 
 ; Guarda una copia legible .TXT y una copia .EDT con colores/fondo.
 GuardarArchivos PROC NEAR
+    mov saveOk, 1
     call GuardarTXT
     call GuardarEDT
     call GuardarHTML
@@ -695,7 +702,12 @@ GuardarTXT PROC NEAR
     xor cx, cx
     mov ah, 3Ch
     int 21h
-    jc  FinGuardarTXT
+    jnc TxtAbiertoD
+    mov dx, OFFSET txtFileName
+    mov ah, 3Ch
+    int 21h
+    jc  ErrorGuardarTXT
+TxtAbiertoD:
     mov bx, ax
     mov si, OFFSET textBuffer
     mov cx, 19
@@ -716,6 +728,9 @@ FilaTXT:
     loop FilaTXT
     mov ah, 3Eh
     int 21h
+    jmp FinGuardarTXT
+ErrorGuardarTXT:
+    mov saveOk, 0
 FinGuardarTXT:
     pop di
     pop si
@@ -745,7 +760,12 @@ GuardarHTML PROC NEAR
     mov ah, 3Ch
     int 21h
     jnc HtmlAbierto
-    jmp FinGuardarHTML
+    mov dx, OFFSET htmlFileName
+    mov ah, 3Ch
+    int 21h
+    jnc HtmlAbiertoLocal
+    jmp ErrorGuardarHTML
+HtmlAbiertoLocal:
 HtmlAbierto:
     mov bx, ax                    ; BX = handle durante toda la rutina
 
@@ -808,6 +828,9 @@ SinSpanAbierto:
     call EscribirLineaHTML
     mov ah, 3Eh
     int 21h
+    jmp FinGuardarHTML
+ErrorGuardarHTML:
+    mov saveOk, 0
 FinGuardarHTML:
     pop es
     pop bp
@@ -943,7 +966,12 @@ GuardarEDT PROC NEAR
     xor cx, cx
     mov ah, 3Ch
     int 21h
-    jc  FinGuardarEDT
+    jnc EdtAbiertoD
+    mov dx, OFFSET activeName
+    mov ah, 3Ch
+    int 21h
+    jc  ErrorGuardarEDT
+EdtAbiertoD:
     mov bx, ax
     mov dx, OFFSET edtHeader
     mov cx, 4
@@ -968,6 +996,9 @@ GuardarEDT PROC NEAR
     pop ds
     mov ah, 3Eh
     int 21h
+    jmp FinGuardarEDT
+ErrorGuardarEDT:
+    mov saveOk, 0
 FinGuardarEDT:
     pop dx
     pop cx
