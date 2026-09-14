@@ -1370,7 +1370,12 @@ check_arrow_keys:
     je goto_key_up
     cmp ah,50h
     je goto_key_down
+    cmp ah,2Dh
+    je goto_exit_loop_altx
     jmp mouse_loop
+
+goto_exit_loop_altx:
+    jmp exit_loop
 
 goto_key_left:
     jmp key_left
