@@ -988,13 +988,30 @@ check_key:
     mov ah,00h
     int 16h
     cmp al,1Bh
-    je exit_loop
+    je goto_exit_loop
+    jmp check_enter_key
 
+goto_exit_loop:
+    jmp exit_loop
+
+check_enter_key:
+    cmp al,0Dh
+    jne check_extended_key
+    jmp enter_click_activate
+
+check_extended_key:
+    cmp al,0
+    je check_arrow_keys_trampoline
+    jmp check_newfileN_typing
+check_arrow_keys_trampoline:
+    jmp check_arrow_keys
+
+check_newfileN_typing:
     cmp windowNshown,1
     je check_newfile_len
     jmp mouse_loop
 check_newfile_len:
-    cmp newfiletextlen,6
+    cmp newfiletextlen,32
     jl newfile_key_store
     jmp mouse_loop
 newfile_key_store:
@@ -1003,17 +1020,86 @@ newfile_key_store:
 
     push ax            ; char
     mov ax,78
-    push ax            ; y (fila fija)
+    push ax            ; y (fila fija en 78)
     mov ax,newfiletextlen
     mov cl,8
     mul cl
     add ax,139
-    push ax            ; x (avanza 8px por cada letra)
+    push ax            ; x (inicia en 139, avanza 8px por letra)
     call DrawChar
 
     inc newfiletextlen
 
     jmp mouse_loop
+
+enter_click_activate:
+    jmp button_is_new
+
+check_arrow_keys:
+    cmp ah,4Bh
+    je goto_key_left
+    cmp ah,4Dh
+    je goto_key_right
+    cmp ah,48h
+    je goto_key_up
+    cmp ah,50h
+    je goto_key_down
+    jmp mouse_loop
+
+goto_key_left:
+    jmp key_left
+goto_key_right:
+    jmp key_right
+goto_key_up:
+    jmp key_up
+goto_key_down:
+    jmp key_down
+
+key_left:
+    mov ax,iposxMS
+    sub ax,4
+    jns key_left_ok
+    xor ax,ax
+key_left_ok:
+    mov iposxMS,ax
+    jmp key_sync
+
+key_right:
+    mov ax,iposxMS
+    add ax,4
+    cmp ax,308
+    jle key_right_ok
+    mov ax,308
+key_right_ok:
+    mov iposxMS,ax
+    jmp key_sync
+
+key_up:
+    mov ax,iposyMS
+    sub ax,4
+    jns key_up_ok
+    xor ax,ax
+key_up_ok:
+    mov iposyMS,ax
+    jmp key_sync
+
+key_down:
+    mov ax,iposyMS
+    add ax,4
+    cmp ax,181
+    jle key_down_ok
+    mov ax,181
+key_down_ok:
+    mov iposyMS,ax
+    jmp key_sync
+
+key_sync:
+    mov cx,iposxMS
+    mov dx,iposyMS
+    mov ax,0004h
+    int 33h
+    jmp mouse_loop
+
 exit_loop:
 
     mov ax,0003h
