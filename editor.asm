@@ -8,21 +8,22 @@
 ;   - TAB+C (centrar), TAB+U (primer renglon) y TAB+D (ultimo renglon).
 ;   - TAB+M y TAB+N para alternar color de texto y fondo nuevo.
 ;   - TAB+I y TAB+J para insertar dos imagenes pixel art.
-;   - TAB+H muestra la ayuda; TAB+S retorna AL=1 para que el menu guarde.
+;   - TAB+H muestra la ayuda; TAB+S guarda (pide nombre si es nuevo).
 ;   - TAB+O abre el navegador de archivos .EDT.
-;   - TAB+R regresa sin guardar.
+;   - TAB+Z (o TAB+R / ESC) regresa al menu principal.
 ;   - TAB+B busca y reemplaza todas las coincidencias del documento.
-;   - ESC retorna al procedimiento que llama al editor.
 ;
-; La creacion, apertura y escritura del archivo se conectan desde el menu.
+; Este archivo es un modulo: no tiene punto de entrada propio. El programa
+; arranca en Menu.asm, que llama a AbrirEditorConArchivo con el nombre del
+; documento elegido. Se ensambla con:  tasm editor.asm;  y se enlaza junto
+; con menu.obj.
 
 .model small
-.stack 100h
 
 EDIT_TOP    EQU 3
 EDIT_BOTTOM EQU 21
 EDIT_COLS   EQU 40               ; 320 pixeles / fuente BIOS de 8 pixeles
-TEXT_ATTR   EQU 255               ; blanco: indice VGA dentro de 0..255
+TEXT_ATTR   EQU 15                ; blanco brillante de la paleta VGA
 BUFFER_SIZE EQU 760               ; 19 renglones x 40 columnas
 MAX_FILES   EQU 10
 
@@ -35,7 +36,7 @@ PANEL_RIGHT  EQU 315
 .data
 titleLine   db '  BLOC DE NOTAS VGA', 0
 borderLine  db '----------------------------------------', 0
-hintLine    db 'TAB+H ayuda TAB+M/N color TAB+S guarda', 0
+hintLine    db 'TAB+H ayuda TAB+S guarda TAB+Z menu', 0
 statusLine  db 'Bloc de notas: EDITANDO', 0
 emptyLine   db EDIT_COLS dup (' '), 0
 activeName  db 'DOCUMENT.EDT', 0  ; nombre activo, actualizado por el navegador
@@ -46,10 +47,13 @@ saveTxtPath  db 'D:\DOCUMENT.TXT', 0
 saveHtmlPath db 'D:\DOCUMENT.HTM', 0
 baseName    db 8 dup (0)          ; nombre sin extension, compartido por los 3
 baseLen     db 0
-namePrompt  db 'Nombre base (max 8 letras) y ENTER:', 0
-savedMsg    db 'GUARDADO EN D: (TXT HTM EDT):', 0
-localSavedMsg db 'GUARDADO LOCAL (monta D: para Escritorio):', 0
-nameInput   db 8, 0, 8 dup (0)
+savedMsg    db 'GUARDADO TXT HTM EDT:', 0
+errorSavedMsg db 'NO SE PUDO GUARDAR:', 0
+namePrompt  db 'Nombre y ENTER:', 0
+untitledName db 'SIN NOMBRE', 0
+nameInput   db 9 dup (0)
+nameLen     db 0
+docSinNombre db 0                 ; 1 = documento nuevo, todavia sin nombre
 dirtyText   db '*', 0
 cleanText   db ' ', 0
 labelFila   db 'F:', 0
@@ -61,7 +65,7 @@ help2       db 'TAB+C centro TAB+U/D arriba/abajo', 0
 help3       db 'TAB+M letra TAB+N fondo', 0
 help4       db 'TAB+I/J imagen 1/2', 0
 help5       db 'TAB+B busca O abre archivos', 0
-help6       db 'Flechas Backspace editan. TAB+R vuelve.', 0
+help6       db 'Flechas Backspace editan. TAB+Z al menu.', 0
 help7       db 'Presione una tecla para volver.', 0
 findLabel   db 'Buscar: ', 0
 replaceLabel db 'Reemplazar con: ', 0
@@ -74,7 +78,7 @@ currentAttr db TEXT_ATTR          ; color de letra VGA, 0..255
 currentBackColor db 1             ; color de fondo VGA, 0..255
 textColorIx db 0
 backColorIx db 0
-textColors  db 255, 28, 15        ; blanco, rosa, blanco brillante
+textColors  db 15, 28, 14         ; blanco, rosa, amarillo
 backColors  db 1, 0, 28           ; morado, contorno, rosa
 textBuffer  db BUFFER_SIZE dup (' ')
 attrBuffer  db BUFFER_SIZE dup (TEXT_ATTR)
@@ -106,7 +110,7 @@ searchLimit dw 0
 dirtyFlag   db 0
 commandMode db 0                  ; 1 despues de TAB: la siguiente letra es comando
 dtaBuffer   db 128 dup (0)
-filePattern db 'D:\*.EDT', 0      ; se guarda y se busca en la raiz de D:
+filePattern db '*.EDT', 0         ; se busca en la carpeta del programa
 fileList    db MAX_FILES * 13 dup (0)
 fileCount   db 0
 fileIndex   db 0
@@ -118,18 +122,12 @@ fontSeg     dw 0                  ; segmento de la tabla de fuente 8x8 de la BIO
 fontOff     dw 0                  ; offset de la tabla de fuente 8x8 de la BIOS
 glyphBuf    db 8 dup (0)          ; copia local de los 8 bytes del glifo actual
 maskFondo   db 0FFh               ; que pixeles de la celda caen dentro del panel
+docRestaurado db 0                ; 1 = CargarEDT ya dejo la pantalla lista
 filaDentro  db 0
 yGlifo      dw 0                  ; linea de pixeles que se esta dibujando
 
 .code
-main PROC
-    mov ax, @data
-    mov ds, ax
-    call LimpiarBuffer
-    call PantallaEdicion
-    mov ax, 4C00h
-    int 21h
-main ENDP
+; El punto de entrada (main) vive en Menu.asm.
 
 ; Carga los tres colores propios sin tocar la pantalla. Se usa por separado
 ; para poder restaurar un documento guardado sin borrar lo que se dibujo.
@@ -208,10 +206,14 @@ TemaMenuVGA ENDP
 
 ; Se puede llamar desde el menu principal en vez de usar main directamente.
 PantallaEdicion PROC NEAR
+    call ObtenerFuente
+    cmp docRestaurado, 0          ; 1 = el .EDT ya pinto fondo, texto e imagenes
+    je  IniciarPantallaNueva
+    mov docRestaurado, 0
+    jmp LeerTecla
+IniciarPantallaNueva:
     mov ax, 0013h                 ; VGA: 320x200, 256 colores
     int 10h
-    call ObtenerFuente
-
     call DibujarEditor
     mov cursorRow, EDIT_TOP
     mov cursorCol, 0
@@ -275,14 +277,18 @@ TabNoU:
     jmp IrAbajo
 TabNoD:
     cmp al, 'r'
+    jne TabNoR
+    jmp VolverAlMenu
+TabNoR:
+    cmp al, 'z'                   ; TAB+Z: regresar al menu principal
     jne ComandoTabInvalido        ; TAB+otra tecla no debe escribir texto
-    jmp SalirSinGuardar
+    jmp VolverAlMenu
 ComandoTabInvalido:
     jmp LeerTecla
 TeclaNormal:
     cmp al, 27                    ; ESC
     jne NoSalirSinGuardar
-    jmp SalirSinGuardar
+    jmp VolverAlMenu
 NoSalirSinGuardar:
     cmp al, 8                     ; Backspace
     jne NoBorrarAnterior
@@ -445,22 +451,32 @@ PintarEspacio:
     call DibujarGlifoFondo
     jmp LeerTecla
 
+; Al documento nuevo se le pide nombre aqui (como Word); si ya lo tiene, se
+; guarda directo. El pedido se dibuja en la linea de ayuda para no tocar el
+; documento: GuardarEDT fotografia la pantalla y debe salir limpia.
 GuardarSalir:
+    cmp docSinNombre, 0
+    je  GuardarConNombre
     call PedirNombreGuardar
-    jc CancelarGuardar
+    jnc NombreAceptado
+    jmp LeerTecla
+NombreAceptado:
+    mov docSinNombre, 0
+    mov dirtyFlag, 0
+    call ActualizarEstado         ; la barra ya muestra el nombre definitivo
+GuardarConNombre:
     call GuardarArchivos
     mov dirtyFlag, 0
     call MostrarGuardado
-    call DibujarEditor
     jmp LeerTecla
-CancelarGuardar:
-    jmp LeerTecla
-SalirSinGuardar:
+VolverAlMenu:
     xor al, al
     ret
 PantallaEdicion ENDP
 
-; Pide un nombre base y construye los nombres .EDT, .TXT y .HTML.
+
+; Pide el nombre base en la linea de ayuda (fila 23) sin tocar el documento.
+; CF=1 si el usuario cancelo con ESC.
 PedirNombreGuardar PROC NEAR
     push ax
     push bx
@@ -471,80 +487,80 @@ PedirNombreGuardar PROC NEAR
     push es
     push ds
     pop es
-    mov ax, 0013h
-    int 10h
-    call TemaMenuVGA
-    mov dh, 10
-    mov dl, 2
-    mov si, OFFSET namePrompt
-    mov bl, 255
+    mov nameLen, 0
+    mov byte ptr nameInput, 0
+PintarPedidoNombre:
+    mov dh, 23
+    mov dl, 0
+    mov si, OFFSET emptyLine
+    mov bl, 0
     call ImprimirCadena
-    mov byte ptr nameInput+1, 0
+    mov dh, 23
+    mov dl, 0
+    mov si, OFFSET namePrompt
+    mov bl, 0Eh
+    call ImprimirCadena
+    mov dh, 23
+    mov dl, 16
+    mov si, OFFSET nameInput
+    mov bl, 0Fh
+    call ImprimirCadena
 LeerNombreVGA:
     mov ah, 00h
     int 16h
-    cmp al, 27
+    cmp al, 27                    ; ESC cancela el guardado
     jne NombreNoEsc
     jmp CancelarNombreVGA
 NombreNoEsc:
-    cmp al, 13
+    cmp al, 13                    ; ENTER acepta si ya hay algo escrito
     jne NombreNoEnter
-    jmp NombreListoVGA
+    cmp nameLen, 0
+    jne NombreListoVGA
+    jmp LeerNombreVGA
 NombreNoEnter:
-    cmp al, 8
+    cmp al, 8                     ; Backspace
     jne NombreNoBackspace
-    jmp BorrarNombreVGA
+    cmp nameLen, 0
+    je  LeerNombreVGA
+    dec nameLen
+    xor bx, bx
+    mov bl, nameLen
+    mov nameInput[bx], 0
+    jmp PintarPedidoNombre
 NombreNoBackspace:
-    call EsCaracterPermitido
+    call CaracterDeNombre         ; solo letras, digitos y guion bajo
     jnc NombrePermitido
     jmp LeerNombreVGA
 NombrePermitido:
-    cmp nameInput+1, 8
-    jb NombreHayEspacio
+    cmp nameLen, 8                ; DOS 8.3
+    jb  NombreHayEspacio
     jmp LeerNombreVGA
 NombreHayEspacio:
     xor bx, bx
-    mov bl, nameInput+1
-    mov nameInput[bx+2], al
-    mov dh, 12
-    mov dl, 2
-    add dl, nameInput+1
-    mov bl, 255
-    call DibujarGlifoFondo
-    inc nameInput+1
-    jmp LeerNombreVGA
-BorrarNombreVGA:
-    cmp nameInput+1, 0
-    jne PuedeBorrarNombre
-    jmp LeerNombreVGA
-PuedeBorrarNombre:
-    dec nameInput+1
-    ; El color va en SI ANTES de calcular la X: PintarRectVGA recibe la X en AX.
-    xor ax, ax
-    mov al, currentBackColor
-    mov si, ax
-    xor ax, ax
-    mov al, nameInput+1
-    add al, 2
-    shl ax, 1
-    shl ax, 1
-    shl ax, 1
-    mov bx, 12*8
-    mov cx, 8
-    mov dx, 8
-    call PintarRectVGA
-    jmp LeerNombreVGA
+    mov bl, nameLen
+    mov nameInput[bx], al
+    inc bx
+    mov nameInput[bx], 0
+    inc nameLen
+    jmp PintarPedidoNombre
 NombreListoVGA:
-    cmp nameInput+1, 0
-    je  NombrePorDefecto
     xor cx, cx
-    mov cl, nameInput+1
+    mov cl, nameLen
     mov baseLen, cl
-    mov si, OFFSET nameInput+2
+    mov si, OFFSET nameInput
     mov di, OFFSET baseName
     rep movsb
     call ConstruirRutas
-NombrePorDefecto:
+    mov dh, 23                    ; se repone la ayuda antes de fotografiar
+    mov dl, 0
+    mov si, OFFSET emptyLine
+    mov bl, 0
+    call ImprimirCadena
+    mov dh, 23
+    mov dl, 1
+    mov si, OFFSET hintLine
+    mov bl, 0Ah
+    call ImprimirCadena
     pop es
     pop di
     pop si
@@ -555,6 +571,16 @@ NombrePorDefecto:
     clc
     ret
 CancelarNombreVGA:
+    mov dh, 23                    ; se repone la linea de ayuda
+    mov dl, 0
+    mov si, OFFSET emptyLine
+    mov bl, 0
+    call ImprimirCadena
+    mov dh, 23
+    mov dl, 1
+    mov si, OFFSET hintLine
+    mov bl, 0Ah
+    call ImprimirCadena
     pop es
     pop di
     pop si
@@ -565,6 +591,30 @@ CancelarNombreVGA:
     stc
     ret
 PedirNombreGuardar ENDP
+
+; AL = tecla. CF=0 si sirve dentro de un nombre de archivo.
+CaracterDeNombre PROC NEAR
+    cmp al, '0'
+    jb  NombreCharMalo
+    cmp al, '9'
+    jbe NombreCharBueno
+    cmp al, 'A'
+    jb  NombreCharMalo
+    cmp al, 'Z'
+    jbe NombreCharBueno
+    cmp al, '_'
+    je  NombreCharBueno
+    cmp al, 'a'
+    jb  NombreCharMalo
+    cmp al, 'z'
+    jbe NombreCharBueno
+NombreCharMalo:
+    stc
+    ret
+NombreCharBueno:
+    clc
+    ret
+CaracterDeNombre ENDP
 
 ; Arma activeName/txtFileName/htmlFileName y las tres rutas D:\ a partir de
 ; baseName/baseLen. La usan tanto el guardado como el navegador de archivos.
@@ -659,22 +709,37 @@ MostrarGuardado PROC NEAR
     push bx
     push dx
     push si
-    mov dh, 16
-    mov dl, 2
+    mov dh, 23                    ; el aviso ocupa la linea de ayuda
+    mov dl, 0
+    mov si, OFFSET emptyLine
+    mov bl, 0
+    call ImprimirCadena
+    mov dh, 23
+    mov dl, 0
     mov si, OFFSET savedMsg
     cmp saveOk, 0
     jne MensajeGuardadoD
-    mov si, OFFSET localSavedMsg
+    mov si, OFFSET errorSavedMsg
 MensajeGuardadoD:
-    mov bl, 255
+    mov bl, 0Eh
     call ImprimirCadena
-    mov dh, 18
-    mov dl, 2
+    mov dh, 23
+    mov dl, 21
     mov si, OFFSET activeName
-    mov bl, 255
+    mov bl, 0Eh
     call ImprimirCadena
     mov ah, 00h
     int 16h
+    mov dh, 23                    ; se repone la linea de ayuda
+    mov dl, 0
+    mov si, OFFSET emptyLine
+    mov bl, 0
+    call ImprimirCadena
+    mov dh, 23
+    mov dl, 1
+    mov si, OFFSET hintLine
+    mov bl, 0Ah
+    call ImprimirCadena
     pop si
     pop dx
     pop bx
@@ -698,12 +763,15 @@ GuardarTXT PROC NEAR
     push dx
     push si
     push di
-    mov dx, OFFSET saveTxtPath
+    push es
+    push ds
+    pop es                        ; ES=DS: la fila se arma con rep movsb
+    mov dx, OFFSET txtFileName    ; la carpeta del programa es la que lista el menu
     xor cx, cx
     mov ah, 3Ch
     int 21h
     jnc TxtAbiertoD
-    mov dx, OFFSET txtFileName
+    mov dx, OFFSET saveTxtPath    ; respaldo: raiz de D: si esta montada
     mov ah, 3Ch
     int 21h
     jc  ErrorGuardarTXT
@@ -732,6 +800,7 @@ FilaTXT:
 ErrorGuardarTXT:
     mov saveOk, 0
 FinGuardarTXT:
+    pop es
     pop di
     pop si
     pop dx
@@ -755,12 +824,12 @@ GuardarHTML PROC NEAR
     push es
     push ds
     pop es                        ; ES=DS: las lineas se arman con movsb
-    mov dx, OFFSET saveHtmlPath
+    mov dx, OFFSET htmlFileName   ; el .HTM local es el que aparece en el menu
     xor cx, cx
     mov ah, 3Ch
     int 21h
     jnc HtmlAbierto
-    mov dx, OFFSET htmlFileName
+    mov dx, OFFSET saveHtmlPath   ; respaldo: raiz de D: si esta montada
     mov ah, 3Ch
     int 21h
     jnc HtmlAbiertoLocal
@@ -962,12 +1031,12 @@ GuardarEDT PROC NEAR
     mov edtHeader+1, al
     mov byte ptr edtHeader+2, EDIT_COLS
     mov byte ptr edtHeader+3, 19
-    mov dx, OFFSET saveEdtPath
+    mov dx, OFFSET activeName     ; .EDT junto al .HTM que lista el menu
     xor cx, cx
     mov ah, 3Ch
     int 21h
     jnc EdtAbiertoD
-    mov dx, OFFSET activeName
+    mov dx, OFFSET saveEdtPath    ; respaldo: raiz de D: si esta montada
     mov ah, 3Ch
     int 21h
     jc  ErrorGuardarEDT
@@ -1014,7 +1083,11 @@ CargarEDT PROC NEAR
     push bx
     push cx
     push dx
-    mov dx, OFFSET saveEdtPath
+    mov dx, OFFSET activeName     ; primero el .EDT de esta carpeta
+    mov ax, 3D00h
+    int 21h
+    jnc EdtAbierto
+    mov dx, OFFSET saveEdtPath    ; si no esta, se intenta en D:
     mov ax, 3D00h
     int 21h
     jnc EdtAbierto
@@ -1418,23 +1491,7 @@ CopiarArchivoActivo PROC NEAR
     mul bl
     mov si, ax
     add si, OFFSET fileList
-    mov baseLen, 0
-    xor bx, bx
-CopiarBaseArchivo:
-    mov al, [si]
-    cmp al, '.'
-    je  FinBaseArchivo
-    or  al, al
-    je  FinBaseArchivo
-    cmp bl, 8
-    jae FinBaseArchivo
-    mov baseName[bx], al
-    inc bx
-    inc si
-    jmp CopiarBaseArchivo
-FinBaseArchivo:
-    mov baseLen, bl
-    call ConstruirRutas
+    call BaseDesdeNombre
     pop si
     pop bx
     pop ax
@@ -2209,4 +2266,111 @@ SigPixelFondo:
     ret
 DibujarGlifoFondo ENDP
 
-END main
+; ---------------------------------------------------------------------------
+; Puente con el menu principal
+; ---------------------------------------------------------------------------
+
+; DS:SI = nombre ASCIIZ (por ejemplo 'NOTA.HTM'). Se queda con la parte previa
+; al punto, arma las rutas .EDT/.TXT/.HTM y deja todo listo para guardar.
+BaseDesdeNombre PROC NEAR
+    push ax
+    push bx
+    push si
+    mov baseLen, 0
+    xor bx, bx
+CopiarBaseNombre:
+    mov al, [si]
+    cmp al, '.'
+    je  FinBaseNombre
+    or  al, al
+    je  FinBaseNombre
+    cmp bl, 8                     ; DOS 8.3: el nombre base no pasa de 8
+    jae FinBaseNombre
+    mov baseName[bx], al
+    inc bx
+    inc si
+    jmp CopiarBaseNombre
+FinBaseNombre:
+    mov baseLen, bl
+    call ConstruirRutas
+    pop si
+    pop bx
+    pop ax
+    ret
+BaseDesdeNombre ENDP
+
+; Unica puerta de entrada que usa Menu.asm.
+; DS:SI = nombre ASCIIZ del archivo elegido en el menu.
+; Si existe su .EDT se restaura tal cual quedo; si no, se abre en blanco.
+; Regresa cuando el usuario presiona TAB+Z, TAB+R o ESC.
+; Documento nuevo desde el icono "+" del menu: entra en blanco y sin nombre.
+; El nombre se pide hasta TAB+S.
+PUBLIC AbrirEditorNuevo
+AbrirEditorNuevo PROC NEAR
+    push ax
+    push cx
+    push si
+    push di
+    push es
+    push ds
+    pop es
+    call LimpiarBuffer
+    mov textColorIx, 0
+    mov backColorIx, 0
+    mov currentAttr, TEXT_ATTR
+    mov currentBackColor, 1
+    mov baseLen, 0
+    mov si, OFFSET untitledName   ; lo que se ve en la barra de estado
+    mov di, OFFSET activeName
+    mov cx, 11
+    rep movsb
+    mov docSinNombre, 1
+    mov docRestaurado, 0
+    call ObtenerFuente
+    call PantallaEdicion
+    pop es
+    pop di
+    pop si
+    pop cx
+    pop ax
+    ret
+AbrirEditorNuevo ENDP
+
+PUBLIC AbrirEditorConArchivo
+AbrirEditorConArchivo PROC NEAR
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+    push ds
+    pop es                        ; ES=DS: varias rutinas copian con movsb
+    call BaseDesdeNombre
+    mov docSinNombre, 0           ; este documento ya tiene nombre
+    call ObtenerFuente
+    call CargarEDT                ; CF=0 si el documento ya existia
+    jnc DocumentoRestaurado
+    call LimpiarBuffer            ; documento nuevo: colores y buffers de fabrica
+    mov textColorIx, 0
+    mov backColorIx, 0
+    mov currentAttr, TEXT_ATTR
+    mov currentBackColor, 1
+    mov docRestaurado, 0
+    jmp EntrarAlEditor
+DocumentoRestaurado:
+    mov docRestaurado, 1
+EntrarAlEditor:
+    call PantallaEdicion
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+AbrirEditorConArchivo ENDP
+
+END
