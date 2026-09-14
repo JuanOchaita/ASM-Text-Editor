@@ -30,6 +30,8 @@ windowEDshown db 0
 
 windowNbuf db 4576 dup(0)
 windowNshown db 0
+newfiletext db 32 dup(0)
+newfiletextlen dw 0
 
 filecol dw 0
 filerow dw 0
@@ -836,6 +838,7 @@ openN_activate:
     call DrawSprite
 
     mov windowNshown,1
+    mov newfiletextlen,0
     jmp click_check_done
 
 openED_activate:
@@ -898,6 +901,17 @@ closeED_activate:
     jmp click_check_done
 
 check_windowN_buttons:
+    cmp iposxMS,145
+    jl check_closeN_region
+    cmp iposxMS,173
+    jg check_closeN_region
+    cmp iposyMS,95
+    jl check_closeN_region
+    cmp iposyMS,109
+    jg check_closeN_region
+    jmp okbtnN_activate
+
+check_closeN_region:
     cmp iposxMS,199
     jl fail_closeN
     cmp iposxMS,209
@@ -909,6 +923,10 @@ check_windowN_buttons:
     jmp closeN_activate
 fail_closeN:
     jmp click_check_done
+
+okbtnN_activate:
+    call AddFileLine
+    jmp restart_program
 
 closeN_activate:
     push offset windowNbuf
@@ -973,6 +991,30 @@ check_key:
     int 16h
     cmp al,1Bh
     je exit_loop
+
+    cmp windowNshown,1
+    je check_newfile_len
+    jmp mouse_loop
+check_newfile_len:
+    cmp newfiletextlen,32
+    jl newfile_key_store
+    jmp mouse_loop
+newfile_key_store:
+    mov bx,newfiletextlen
+    mov [newfiletext+bx],al
+
+    push ax
+    mov ax,newfiletextlen
+    mov cl,8
+    mul cl
+    add ax,78
+    push ax
+    mov ax,139
+    push ax
+    call DrawChar
+
+    inc newfiletextlen
+
     jmp mouse_loop
 exit_loop:
 
@@ -1152,6 +1194,65 @@ deleteline_done:
     pop ax
     ret
 DeleteFileLine ENDP
+
+AddFileLine PROC
+    push ax
+    push bx
+    push cx
+    push dx
+
+    ; Intentar abrir el archivo existente en modo lectura/escritura
+    mov ax,3D02h
+    mov dx,offset metadata_filename
+    int 21h
+    jnc addline_opened
+
+    ; Si no existe, crearlo
+    mov ah,3Ch
+    xor cx,cx
+    mov dx,offset metadata_filename
+    int 21h
+    mov filehandle,ax
+    jmp addline_write
+
+addline_opened:
+    mov filehandle,ax
+    ; Mover el puntero al final del archivo antes de escribir
+    mov bx,filehandle
+    mov ax,4202h
+    xor cx,cx
+    xor dx,dx
+    int 21h
+
+addline_write:
+    ; Escribir el texto ingresado (si hay algo)
+    mov cx,newfiletextlen
+    cmp cx,0
+    je addline_skip_text
+    mov bx,filehandle
+    mov dx,offset newfiletext
+    mov ah,40h
+    int 21h
+addline_skip_text:
+
+    ; Escribir el salto de línea
+    mov bx,filehandle
+    mov ah,40h
+    mov cx,1
+    mov dx,offset lfbyte
+    int 21h
+
+    ; Cerrar archivo
+    mov bx,filehandle
+    mov ah,3Eh
+    int 21h
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+AddFileLine ENDP
 
 TrimCR PROC
     push si
