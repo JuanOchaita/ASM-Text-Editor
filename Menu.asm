@@ -484,6 +484,10 @@ no_metadata:
     mov colcount,0
     mov rowcount,0
 
+    mov cx,linecount
+    cmp cx,0
+    je skip_draw_files
+
 draw_files_loop:
     push cx
 
@@ -521,6 +525,25 @@ col_updated:
     loop draw_files_loop
 
 skip_draw_files:
+
+    mov ax,colcount
+    mov bx,52
+    mul bx
+    add ax,19
+    mov curX,ax
+
+    mov ax,rowcount
+    mov bx,52
+    mul bx
+    add ax,29
+    mov curY,ax
+
+    push offset newfile
+    push curY
+    push curX
+    push KYNF
+    push KXNF
+    call DrawSprite
 
 mouse_loop:
     mov ax,0003h
