@@ -3,7 +3,7 @@
 .STACK 100h
 
 .DATA
-
+newfilename db 13 dup(0)
 searchpattern db '*.htm',0
 dtabuf db 43 dup(0)
 filenamesbuf db 64*13 dup(0)
@@ -921,6 +921,8 @@ fail_closeN:
     jmp click_check_done
 
 okbtnN_activate:
+    cmp newfiletextlen,0
+    je click_check_done
     call AddFileLine
     jmp restart_program
 
@@ -1137,53 +1139,16 @@ DeleteFileLine PROC
     push bx
     push cx
     push dx
-    push si
-    push di
 
-    mov ah,3Ch
-    xor cx,cx
-    mov dx,offset metadata_filename
-    int 21h
-    mov filehandle,ax
+    mov ax,fileindex
+    mov bx,13
+    mul bx
+    mov dx,ax
+    add dx,offset filenamesbuf
 
-    xor si,si
-deleteline_loop:
-    mov ax,linecount
-    cmp si,ax
-    jge deleteline_done
-
-    cmp si,fileindex
-    je deleteline_skip
-
-    mov di,si
-    shl di,1
-    mov cx,[linelengths+di]
-    cmp cx,0
-    je deleteline_writenl
-    mov dx,[lineoffsets+di]
-    add dx,offset filebuf
-    mov bx,filehandle
-    mov ah,40h
+    mov ah,41h
     int 21h
 
-deleteline_writenl:
-    mov bx,filehandle
-    mov ah,40h
-    mov cx,1
-    mov dx,offset lfbyte
-    int 21h
-
-deleteline_skip:
-    inc si
-    jmp deleteline_loop
-
-deleteline_done:
-    mov bx,filehandle
-    mov ah,3Eh
-    int 21h
-
-    pop di
-    pop si
     pop dx
     pop cx
     pop bx
@@ -1196,53 +1161,50 @@ AddFileLine PROC
     push bx
     push cx
     push dx
+    push si
+    push di
 
-    ; Intentar abrir el archivo existente en modo lectura/escritura
-    mov ax,3D02h
-    mov dx,offset metadata_filename
-    int 21h
-    jnc addline_opened
-
-    ; Si no existe, crearlo
-    mov ah,3Ch
-    xor cx,cx
-    mov dx,offset metadata_filename
-    int 21h
-    mov filehandle,ax
-    jmp addline_write
-
-addline_opened:
-    mov filehandle,ax
-    ; Mover el puntero al final del archivo antes de escribir
-    mov bx,filehandle
-    mov ax,4202h
-    xor cx,cx
-    xor dx,dx
-    int 21h
-
-addline_write:
-    ; Escribir el texto ingresado (si hay algo)
+    ; Construir el nombre del archivo: texto ingresado + ".HTM" + 0
+    mov si,offset newfiletext
+    mov di,offset newfilename
     mov cx,newfiletextlen
     cmp cx,0
-    je addline_skip_text
-    mov bx,filehandle
-    mov dx,offset newfiletext
-    mov ah,40h
-    int 21h
-addline_skip_text:
+    je addfile_copydone
 
-    ; Escribir el salto de línea
-    mov bx,filehandle
-    mov ah,40h
-    mov cx,1
-    mov dx,offset lfbyte
-    int 21h
+addfile_copyloop:
+    mov al,[si]
+    mov [di],al
+    inc si
+    inc di
+    dec cx
+    jnz addfile_copyloop
 
-    ; Cerrar archivo
+addfile_copydone:
+    mov BYTE PTR [di],'.'
+    inc di
+    mov BYTE PTR [di],'H'
+    inc di
+    mov BYTE PTR [di],'T'
+    inc di
+    mov BYTE PTR [di],'M'
+    inc di
+    mov BYTE PTR [di],0
+
+    ; Crear el archivo nuevo (vacío)
+    mov ah,3Ch
+    xor cx,cx
+    mov dx,offset newfilename
+    int 21h
+    jc addfile_done
+
+    mov filehandle,ax
     mov bx,filehandle
     mov ah,3Eh
     int 21h
 
+addfile_done:
+    pop di
+    pop si
     pop dx
     pop cx
     pop bx
